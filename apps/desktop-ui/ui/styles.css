@@ -188,7 +188,13 @@ textarea:focus {
   gap: 8px;
 }
 
-.history-item button {
+.history-item-row {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 6px;
+}
+
+.history-select-btn {
   width: 100%;
   text-align: left;
   background: linear-gradient(140deg, rgba(14, 26, 43, 0.88), rgba(9, 15, 24, 0.7));
@@ -201,14 +207,30 @@ textarea:focus {
   overflow-wrap: anywhere;
 }
 
-.history-item button:hover {
+.history-select-btn:hover {
   border-color: rgba(88, 236, 235, 0.7);
   transform: translateY(-1px);
 }
 
-.history-item button.active {
+.history-select-btn.active {
   border-color: rgba(88, 236, 235, 0.88);
   box-shadow: 0 8px 20px rgba(11, 81, 96, 0.3);
+}
+
+.history-item-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.history-action-btn {
+  flex: 1;
+  padding: 6px 8px;
+  font-size: 0.72rem;
+}
+
+.history-action-btn.danger {
+  border-color: rgba(255, 111, 134, 0.45);
+  color: #ffd0db;
 }
 
 .history-title {
