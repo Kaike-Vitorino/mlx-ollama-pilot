@@ -18,6 +18,10 @@ pub struct ChatRuntimeConfig {
     pub command_prefix_args: Vec<String>,
     pub command_suffix_args: Vec<String>,
     pub timeout: Duration,
+    pub airllm_enabled: bool,
+    pub airllm_threshold_percent: u8,
+    pub airllm_python_command: String,
+    pub airllm_runner: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -245,19 +249,8 @@ async fn run_chat_stream(
         )));
     }
 
-    if model_scan.safetensors_bytes > 0 {
-        if let Some(system_memory) = detect_system_memory_bytes() {
-            let safe_limit = system_memory.saturating_mul(85) / 100;
-            if model_scan.safetensors_bytes > safe_limit {
-                return Err(ChatStreamError::InvalidRequest(format!(
-                    "modelo '{}' exige aproximadamente {} de pesos, acima do limite seguro da maquina (RAM fisica {}); escolha um modelo menor ou quantizacao mais agressiva",
-                    model_path.display(),
-                    format_size(model_scan.safetensors_bytes),
-                    format_size(system_memory),
-                )));
-            }
-        }
-    }
+    let memory_profile = memory_profile(model_scan.safetensors_bytes);
+    let should_try_airllm = should_try_airllm(&cfg, memory_profile);
 
     let prompt = build_prompt(&request.messages);
     let mut args = cfg.command_prefix_args.clone();
@@ -282,7 +275,11 @@ async fn run_chat_stream(
     }
 
     args.extend(cfg.command_suffix_args.clone());
+    if should_try_airllm {
+        append_large_model_guard_args(&mut args);
+    }
     let command_preview = format!("{} {}", cfg.command, args.join(" "));
+    let prompt_for_command = prompt.clone();
 
     send_event(&tx, ChatStreamEvent::status("waiting")).await?;
 
@@ -413,14 +410,54 @@ async fn run_chat_stream(
             )));
         }
 
-        Ok((collected, prompt, started.elapsed().as_millis() as u64))
+        Ok((
+            collected,
+            prompt_for_command,
+            started.elapsed().as_millis() as u64,
+        ))
     };
 
-    let (raw_output, prompt_text, latency_ms) = timeout(cfg.timeout, command_future)
+    let primary_result = timeout(cfg.timeout, command_future)
         .await
-        .map_err(|_| ChatStreamError::Timeout(cfg.timeout.as_secs()))??;
+        .map_err(|_| ChatStreamError::Timeout(cfg.timeout.as_secs()))?;
+
+    let (raw_output, prompt_text, latency_ms, used_fallback) = match primary_result {
+        Ok((raw_output, prompt_text, latency_ms)) => (raw_output, prompt_text, latency_ms, false),
+        Err(ChatStreamError::CommandFailed(message))
+            if should_try_airllm && is_memory_pressure_error(&message) =>
+        {
+            send_event(&tx, ChatStreamEvent::status("fallback_airllm")).await?;
+            let started_fallback = Instant::now();
+            let fallback_output = run_airllm_bridge(&cfg, &model_path, &request, &prompt).await?;
+            (
+                fallback_output,
+                prompt.clone(),
+                started_fallback.elapsed().as_millis() as u64,
+                true,
+            )
+        }
+        Err(error) => return Err(error),
+    };
 
     let parsed = ParsedOutput::parse(&raw_output);
+
+    if used_fallback {
+        if !parsed.thinking.trim().is_empty() {
+            send_event(
+                &tx,
+                ChatStreamEvent::thinking_delta(parsed.thinking.clone()),
+            )
+            .await?;
+        }
+        if !parsed.answer.trim().is_empty() {
+            send_event(&tx, ChatStreamEvent::answer_delta(parsed.answer.clone())).await?;
+        } else {
+            let fallback_text = raw_output.trim().to_string();
+            if !fallback_text.is_empty() {
+                send_event(&tx, ChatStreamEvent::answer_delta(fallback_text)).await?;
+            }
+        }
+    }
 
     let prompt_tokens = parsed
         .metrics
@@ -453,6 +490,127 @@ async fn send_event(
     tx.send(event)
         .await
         .map_err(|_| ChatStreamError::ClientDisconnected)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct MemoryProfile {
+    usage_ratio: f64,
+}
+
+fn has_arg(args: &[String], flag: &str) -> bool {
+    args.iter().any(|value| value == flag)
+}
+
+fn append_large_model_guard_args(args: &mut Vec<String>) {
+    if !has_arg(args, "--max-kv-size") {
+        args.push("--max-kv-size".to_string());
+        args.push("1024".to_string());
+    }
+    if !has_arg(args, "--kv-bits") {
+        args.push("--kv-bits".to_string());
+        args.push("4".to_string());
+    }
+    if !has_arg(args, "--kv-group-size") {
+        args.push("--kv-group-size".to_string());
+        args.push("64".to_string());
+    }
+    if !has_arg(args, "--quantized-kv-start") {
+        args.push("--quantized-kv-start".to_string());
+        args.push("0".to_string());
+    }
+}
+
+fn memory_profile(model_bytes: u64) -> Option<MemoryProfile> {
+    let system_memory_bytes = detect_system_memory_bytes()?;
+    if model_bytes == 0 || system_memory_bytes == 0 {
+        return None;
+    }
+    Some(MemoryProfile {
+        usage_ratio: model_bytes as f64 / system_memory_bytes as f64,
+    })
+}
+
+fn should_try_airllm(cfg: &ChatRuntimeConfig, profile: Option<MemoryProfile>) -> bool {
+    if !cfg.airllm_enabled {
+        return false;
+    }
+    let Some(profile) = profile else { return false };
+    let threshold = (cfg.airllm_threshold_percent as f64 / 100.0).clamp(0.0, 1.0);
+    profile.usage_ratio >= threshold
+}
+
+fn is_memory_pressure_error(text: &str) -> bool {
+    let normalized = text.to_ascii_lowercase();
+    normalized.contains("insufficient memory")
+        || normalized.contains("out of memory")
+        || normalized.contains("outofmemory")
+        || normalized.contains("kiogpucommandbuffercallbackerroroutofmemory")
+        || normalized.contains("max_recommended_working_set_size")
+}
+
+async fn run_airllm_bridge(
+    cfg: &ChatRuntimeConfig,
+    model_path: &Path,
+    request: &ChatRequest,
+    prompt: &str,
+) -> Result<String, ChatStreamError> {
+    let mut args = vec![
+        cfg.airllm_runner.clone(),
+        "--model".to_string(),
+        model_path.display().to_string(),
+        "--prompt".to_string(),
+        prompt.to_string(),
+        "--device".to_string(),
+        "cpu".to_string(),
+    ];
+
+    if let Some(temp) = request.options.temperature {
+        args.push("--temp".to_string());
+        args.push(temp.to_string());
+    }
+
+    if let Some(max_tokens) = request.options.max_tokens {
+        args.push("--max-tokens".to_string());
+        args.push(max_tokens.to_string());
+    }
+
+    if let Some(top_p) = request.options.top_p {
+        args.push("--top-p".to_string());
+        args.push(top_p.to_string());
+    }
+
+    let mut command = Command::new(&cfg.airllm_python_command);
+    command
+        .args(&args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+
+    let output = timeout(cfg.timeout, command.output())
+        .await
+        .map_err(|_| ChatStreamError::Timeout(cfg.timeout.as_secs()))?
+        .map_err(|error| {
+            ChatStreamError::Io(format!(
+                "falha ao iniciar fallback airllm '{}': {error}",
+                cfg.airllm_python_command
+            ))
+        })?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+
+    if !output.status.success() {
+        let details = if stderr.is_empty() {
+            describe_exit_status(output.status)
+        } else {
+            format!("{}; {}", describe_exit_status(output.status), stderr)
+        };
+        return Err(ChatStreamError::CommandFailed(format!(
+            "fallback airllm falhou: {details}"
+        )));
+    }
+
+    Ok(stdout)
 }
 
 fn resolve_model_path(cfg: &ChatRuntimeConfig, model_id: &str) -> PathBuf {
@@ -743,11 +901,6 @@ fn detect_system_memory_bytes() -> Option<u64> {
     {
         None
     }
-}
-
-fn format_size(bytes: u64) -> String {
-    const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
-    format!("{:.1} GiB", bytes as f64 / GIB)
 }
 
 fn describe_exit_status(status: ExitStatus) -> String {
