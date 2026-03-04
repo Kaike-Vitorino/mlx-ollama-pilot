@@ -46,6 +46,8 @@ pub struct MlxProvider {
     cfg: MlxProviderConfig,
 }
 
+const RUNTIME_META_PREFIX: &str = "[[MLX-PILOT-META";
+
 impl MlxProvider {
     pub fn new(cfg: MlxProviderConfig) -> Self {
         Self { cfg }
@@ -85,7 +87,7 @@ impl MlxProvider {
     }
 
     fn extract_text(raw_output: &str) -> String {
-        raw_output.trim().to_string()
+        Self::strip_runtime_meta(raw_output).trim().to_string()
     }
 
     fn command_debug_string(command: &str, args: &[String]) -> String {
@@ -185,6 +187,42 @@ impl MlxProvider {
             .skip(char_count.saturating_sub(max_chars))
             .collect::<String>();
         format!("...{tail}")
+    }
+
+    fn runtime_meta_line(airllm_required: bool, airllm_used: bool) -> Option<String> {
+        if !airllm_required && !airllm_used {
+            return None;
+        }
+        Some(format!(
+            "[[MLX-PILOT-META airllm_required={} airllm_used={}]]",
+            if airllm_required { 1 } else { 0 },
+            if airllm_used { 1 } else { 0 }
+        ))
+    }
+
+    fn inject_runtime_meta(raw: String, airllm_required: bool, airllm_used: bool) -> String {
+        let Some(meta_line) = Self::runtime_meta_line(airllm_required, airllm_used) else {
+            return raw;
+        };
+
+        if raw.trim().is_empty() {
+            return meta_line;
+        }
+
+        format!("{meta_line}\n{raw}")
+    }
+
+    fn strip_runtime_meta(raw_output: &str) -> String {
+        let mut lines = raw_output.lines();
+        let Some(first_line) = lines.next() else {
+            return String::new();
+        };
+
+        if first_line.trim_start().starts_with(RUNTIME_META_PREFIX) {
+            return lines.collect::<Vec<_>>().join("\n");
+        }
+
+        raw_output.to_string()
     }
 
     fn has_arg(args: &[String], flag: &str) -> bool {
@@ -543,6 +581,7 @@ impl ModelProvider for MlxProvider {
             .run_command_capture(&self.cfg.command, &primary_args)
             .await?;
 
+        let mut airllm_used = false;
         let raw = if primary.status.success() {
             primary.stdout
         } else if should_try_airllm
@@ -554,6 +593,7 @@ impl ModelProvider for MlxProvider {
                 .await?;
 
             if airllm.status.success() {
+                airllm_used = true;
                 airllm.stdout
             } else {
                 let primary_details =
@@ -573,6 +613,8 @@ impl ModelProvider for MlxProvider {
                 stderr: Self::failure_details(&primary.stdout, &primary.stderr, &primary.status),
             });
         };
+
+        let raw = Self::inject_runtime_meta(raw, should_try_airllm, airllm_used);
 
         let text = Self::extract_text(&raw);
 
