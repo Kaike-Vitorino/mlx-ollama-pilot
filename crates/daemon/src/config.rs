@@ -167,6 +167,14 @@ pub struct AppConfig {
     pub mlx_prefix_args: Vec<String>,
     pub mlx_suffix_args: Vec<String>,
     pub mlx_timeout: Duration,
+    #[serde(default = "default_true")]
+    pub mlx_airllm_enabled: bool,
+    #[serde(default = "default_mlx_airllm_threshold_percent")]
+    pub mlx_airllm_threshold_percent: u8,
+    #[serde(default = "default_mlx_airllm_python_command")]
+    pub mlx_airllm_python_command: String,
+    #[serde(default = "default_mlx_airllm_runner")]
+    pub mlx_airllm_runner: String,
     pub llamacpp_server_binary: String,
     pub llamacpp_base_url: String,
     pub llamacpp_timeout: Duration,
@@ -217,6 +225,10 @@ impl Default for AppConfig {
             mlx_prefix_args: Vec::new(),
             mlx_suffix_args: Vec::new(),
             mlx_timeout: Duration::from_secs(900),
+            mlx_airllm_enabled: true,
+            mlx_airllm_threshold_percent: default_mlx_airllm_threshold_percent(),
+            mlx_airllm_python_command: default_mlx_airllm_python_command(),
+            mlx_airllm_runner: default_mlx_airllm_runner(),
             llamacpp_server_binary: default_llamacpp_server_binary(),
             llamacpp_base_url: "http://127.0.0.1:11439".to_string(),
             llamacpp_timeout: Duration::from_secs(900),
@@ -345,6 +357,28 @@ impl AppConfig {
         if let Ok(value) = env::var("APP_MLX_TIMEOUT_SECS") {
             if let Ok(seconds) = value.parse::<u64>() {
                 self.mlx_timeout = Duration::from_secs(seconds.max(1));
+            }
+        }
+
+        if let Ok(value) = env::var("APP_MLX_AIRLLM_ENABLED") {
+            self.mlx_airllm_enabled = parse_bool(&value, self.mlx_airllm_enabled);
+        }
+
+        if let Ok(value) = env::var("APP_MLX_AIRLLM_THRESHOLD_PERCENT") {
+            if let Ok(parsed) = value.parse::<u8>() {
+                self.mlx_airllm_threshold_percent = parsed.clamp(1, 100);
+            }
+        }
+
+        if let Ok(value) = env::var("APP_MLX_AIRLLM_PYTHON_COMMAND") {
+            if !value.trim().is_empty() {
+                self.mlx_airllm_python_command = value;
+            }
+        }
+
+        if let Ok(value) = env::var("APP_MLX_AIRLLM_RUNNER") {
+            if !value.trim().is_empty() {
+                self.mlx_airllm_runner = value;
             }
         }
 
@@ -643,6 +677,25 @@ fn default_mlx_command() -> String {
     } else {
         "mlx_lm.generate".to_string()
     }
+}
+
+fn default_mlx_airllm_python_command() -> String {
+    let preferred = home_dir()
+        .map(|home| home.join("mlx-env").join("bin").join("python"))
+        .unwrap_or_else(|| PathBuf::from("python3"));
+    if preferred.exists() {
+        preferred.display().to_string()
+    } else {
+        "python3".to_string()
+    }
+}
+
+fn default_mlx_airllm_runner() -> String {
+    "scripts/mlx_airllm_bridge.py".to_string()
+}
+
+fn default_mlx_airllm_threshold_percent() -> u8 {
+    70
 }
 
 fn default_llamacpp_server_binary() -> String {
