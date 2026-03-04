@@ -302,6 +302,10 @@ pub async fn run() -> anyhow::Result<()> {
         command_prefix_args: cfg.mlx_prefix_args.clone(),
         command_suffix_args: cfg.mlx_suffix_args.clone(),
         timeout: cfg.mlx_timeout,
+        airllm_enabled: cfg.mlx_airllm_enabled,
+        airllm_threshold_percent: cfg.mlx_airllm_threshold_percent,
+        airllm_python_command: cfg.mlx_airllm_python_command.clone(),
+        airllm_runner: cfg.mlx_airllm_runner.clone(),
     }));
 
     let llamacpp_provider = Arc::new(LlamaCppProvider::new(LlamaCppProviderConfig {
@@ -349,6 +353,10 @@ pub async fn run() -> anyhow::Result<()> {
             command_prefix_args: cfg.mlx_prefix_args.clone(),
             command_suffix_args: cfg.mlx_suffix_args.clone(),
             timeout: cfg.mlx_timeout,
+            airllm_enabled: cfg.mlx_airllm_enabled,
+            airllm_threshold_percent: cfg.mlx_airllm_threshold_percent,
+            airllm_python_command: cfg.mlx_airllm_python_command.clone(),
+            airllm_runner: cfg.mlx_airllm_runner.clone(),
         },
         openclaw_runtime: Arc::new(OpenClawRuntime::new(OpenClawRuntimeConfig {
             node_command: cfg.openclaw_node_command.clone(),

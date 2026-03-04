@@ -19,6 +19,10 @@ pub struct MlxProviderConfig {
     pub command_prefix_args: Vec<String>,
     pub command_suffix_args: Vec<String>,
     pub timeout: Duration,
+    pub airllm_enabled: bool,
+    pub airllm_threshold_percent: u8,
+    pub airllm_python_command: String,
+    pub airllm_runner: String,
 }
 
 impl Default for MlxProviderConfig {
@@ -29,6 +33,10 @@ impl Default for MlxProviderConfig {
             command_prefix_args: Vec::new(),
             command_suffix_args: Vec::new(),
             timeout: Duration::from_secs(900),
+            airllm_enabled: true,
+            airllm_threshold_percent: 70,
+            airllm_python_command: default_airllm_python_command(),
+            airllm_runner: default_airllm_runner(),
         }
     }
 }
@@ -178,6 +186,155 @@ impl MlxProvider {
             .collect::<String>();
         format!("...{tail}")
     }
+
+    fn has_arg(args: &[String], flag: &str) -> bool {
+        args.iter().any(|value| value == flag)
+    }
+
+    fn append_large_model_guard_args(args: &mut Vec<String>) {
+        if !Self::has_arg(args, "--max-kv-size") {
+            args.push("--max-kv-size".to_string());
+            args.push("1024".to_string());
+        }
+        if !Self::has_arg(args, "--kv-bits") {
+            args.push("--kv-bits".to_string());
+            args.push("4".to_string());
+        }
+        if !Self::has_arg(args, "--kv-group-size") {
+            args.push("--kv-group-size".to_string());
+            args.push("64".to_string());
+        }
+        if !Self::has_arg(args, "--quantized-kv-start") {
+            args.push("--quantized-kv-start".to_string());
+            args.push("0".to_string());
+        }
+    }
+
+    fn memory_profile(model_bytes: u64) -> Option<MemoryProfile> {
+        let system_memory_bytes = Self::detect_system_memory_bytes()?;
+        if system_memory_bytes == 0 || model_bytes == 0 {
+            return None;
+        }
+
+        Some(MemoryProfile {
+            system_memory_bytes,
+            model_bytes,
+            usage_ratio: model_bytes as f64 / system_memory_bytes as f64,
+        })
+    }
+
+    fn should_try_airllm(&self, profile: Option<MemoryProfile>) -> bool {
+        if !self.cfg.airllm_enabled {
+            return false;
+        }
+        let Some(profile) = profile else { return false };
+        let threshold = (self.cfg.airllm_threshold_percent as f64 / 100.0).clamp(0.0, 1.0);
+        profile.usage_ratio >= threshold
+    }
+
+    fn is_memory_pressure_error(stdout: &str, stderr: &str) -> bool {
+        let text = format!("{stdout}\n{stderr}").to_ascii_lowercase();
+        text.contains("insufficient memory")
+            || text.contains("out of memory")
+            || text.contains("outofmemory")
+            || text.contains("kiogpucommandbuffercallbackerroroutofmemory")
+            || text.contains("max_recommended_working_set_size")
+    }
+
+    fn failure_details(stdout: &str, stderr: &str, status: &ExitStatus) -> String {
+        let status_detail = Self::command_status_details(status);
+        if !stderr.trim().is_empty() {
+            return format!("{status_detail}; {}", stderr.trim());
+        }
+
+        let stdout_tail = Self::tail_text(stdout, 700);
+        if stdout_tail.is_empty() {
+            status_detail
+        } else {
+            format!("{status_detail}; stdout: {stdout_tail}")
+        }
+    }
+
+    fn build_airllm_args(
+        &self,
+        model_path: &Path,
+        prompt: &str,
+        request: &ChatRequest,
+    ) -> Vec<String> {
+        let mut args = vec![
+            self.cfg.airllm_runner.clone(),
+            "--model".to_string(),
+            model_path.display().to_string(),
+            "--prompt".to_string(),
+            prompt.to_string(),
+            "--device".to_string(),
+            "cpu".to_string(),
+        ];
+
+        if let Some(temp) = request.options.temperature {
+            args.push("--temp".to_string());
+            args.push(temp.to_string());
+        }
+
+        if let Some(max_tokens) = request.options.max_tokens {
+            args.push("--max-tokens".to_string());
+            args.push(max_tokens.to_string());
+        }
+
+        if let Some(top_p) = request.options.top_p {
+            args.push("--top-p".to_string());
+            args.push(top_p.to_string());
+        }
+
+        args
+    }
+
+    async fn run_command_capture(
+        &self,
+        command_name: &str,
+        args: &[String],
+    ) -> Result<CommandRun, ProviderError> {
+        let command_debug = Self::command_debug_string(command_name, args);
+        debug!("running command: {command_debug}");
+
+        let mut command = Command::new(command_name);
+        command
+            .args(args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        let output = timeout(self.cfg.timeout, command.output())
+            .await
+            .map_err(|_| ProviderError::Timeout {
+                seconds: self.cfg.timeout.as_secs(),
+            })?
+            .map_err(|source| ProviderError::Io {
+                context: format!("spawning command {command_name}"),
+                source,
+            })?;
+
+        Ok(CommandRun {
+            command_debug,
+            stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+            status: output.status,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct MemoryProfile {
+    system_memory_bytes: u64,
+    model_bytes: u64,
+    usage_ratio: f64,
+}
+
+#[derive(Debug)]
+struct CommandRun {
+    command_debug: String,
+    stdout: String,
+    stderr: String,
+    status: ExitStatus,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -206,6 +363,24 @@ fn default_mlx_command() -> String {
     } else {
         "mlx_lm.generate".to_string()
     }
+}
+
+fn default_airllm_python_command() -> String {
+    let preferred = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .ok()
+        .map(PathBuf::from)
+        .map(|home| home.join("mlx-env").join("bin").join("python"))
+        .unwrap_or_else(|| PathBuf::from("python3"));
+    if preferred.exists() {
+        preferred.display().to_string()
+    } else {
+        "python3".to_string()
+    }
+}
+
+fn default_airllm_runner() -> String {
+    "scripts/mlx_airllm_bridge.py".to_string()
 }
 
 fn default_models_dir() -> PathBuf {
@@ -323,91 +498,82 @@ impl ModelProvider for MlxProvider {
             });
         }
 
-        if model_scan.safetensors_bytes > 0 {
-            if let Some(system_memory) = Self::detect_system_memory_bytes() {
-                let safe_limit = system_memory.saturating_mul(85) / 100;
-                if model_scan.safetensors_bytes > safe_limit {
-                    return Err(ProviderError::Unavailable {
-                        details: format!(
-                            "modelo '{}' exige aproximadamente {} de pesos, acima do limite seguro da maquina (RAM fisica {}); escolha um modelo menor ou quantizacao mais agressiva",
-                            model_path.display(),
-                            Self::format_size(model_scan.safetensors_bytes),
-                            Self::format_size(system_memory),
-                        ),
-                    });
-                }
-            }
+        let memory_profile = Self::memory_profile(model_scan.safetensors_bytes);
+        let should_try_airllm = self.should_try_airllm(memory_profile);
+        if let Some(profile) = memory_profile {
+            debug!(
+                "model memory profile: model={} system={} ratio={:.2}%",
+                Self::format_size(profile.model_bytes),
+                Self::format_size(profile.system_memory_bytes),
+                profile.usage_ratio * 100.0
+            );
         }
 
         let prompt = Self::build_prompt(&request.messages);
-        let mut args = self.cfg.command_prefix_args.clone();
+        let mut primary_args = self.cfg.command_prefix_args.clone();
 
-        args.push("--model".to_string());
-        args.push(model_path.display().to_string());
-        args.push("--prompt".to_string());
-        args.push(prompt.clone());
+        primary_args.push("--model".to_string());
+        primary_args.push(model_path.display().to_string());
+        primary_args.push("--prompt".to_string());
+        primary_args.push(prompt.clone());
 
         if let Some(temp) = request.options.temperature {
-            args.push("--temp".to_string());
-            args.push(temp.to_string());
+            primary_args.push("--temp".to_string());
+            primary_args.push(temp.to_string());
         }
 
         if let Some(max_tokens) = request.options.max_tokens {
-            args.push("--max-tokens".to_string());
-            args.push(max_tokens.to_string());
+            primary_args.push("--max-tokens".to_string());
+            primary_args.push(max_tokens.to_string());
         }
 
         if let Some(top_p) = request.options.top_p {
-            args.push("--top-p".to_string());
-            args.push(top_p.to_string());
+            primary_args.push("--top-p".to_string());
+            primary_args.push(top_p.to_string());
         }
 
-        args.extend(self.cfg.command_suffix_args.clone());
+        primary_args.extend(self.cfg.command_suffix_args.clone());
 
-        let command_debug = Self::command_debug_string(&self.cfg.command, &args);
-        debug!("running mlx command: {command_debug}");
-
-        let mut command = Command::new(&self.cfg.command);
-        command
-            .args(&args)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+        if should_try_airllm {
+            Self::append_large_model_guard_args(&mut primary_args);
+        }
 
         let started = Instant::now();
-        let output = timeout(self.cfg.timeout, command.output())
-            .await
-            .map_err(|_| ProviderError::Timeout {
-                seconds: self.cfg.timeout.as_secs(),
-            })?
-            .map_err(|source| ProviderError::Io {
-                context: format!("spawning command {}", self.cfg.command),
-                source,
-            })?;
+        let primary = self
+            .run_command_capture(&self.cfg.command, &primary_args)
+            .await?;
 
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let raw = if primary.status.success() {
+            primary.stdout
+        } else if should_try_airllm
+            && Self::is_memory_pressure_error(&primary.stdout, &primary.stderr)
+        {
+            let airllm_args = self.build_airllm_args(&model_path, &prompt, &request);
+            let airllm = self
+                .run_command_capture(&self.cfg.airllm_python_command, &airllm_args)
+                .await?;
 
-        if !output.status.success() {
-            let status_detail = Self::command_status_details(&output.status);
-            let mut details = status_detail;
-            if !stderr.is_empty() {
-                details.push_str("; ");
-                details.push_str(&stderr);
+            if airllm.status.success() {
+                airllm.stdout
             } else {
-                let stdout_tail = Self::tail_text(&stdout, 700);
-                if !stdout_tail.is_empty() {
-                    details.push_str("; stdout: ");
-                    details.push_str(&stdout_tail);
-                }
+                let primary_details =
+                    Self::failure_details(&primary.stdout, &primary.stderr, &primary.status);
+                let fallback_details =
+                    Self::failure_details(&airllm.stdout, &airllm.stderr, &airllm.status);
+                return Err(ProviderError::CommandFailed {
+                    command: format!("{} || {}", primary.command_debug, airllm.command_debug),
+                    stderr: format!(
+                        "mlx falhou por memoria: {primary_details}; fallback airllm falhou: {fallback_details}"
+                    ),
+                });
             }
-
+        } else {
             return Err(ProviderError::CommandFailed {
-                command: command_debug,
-                stderr: details,
+                command: primary.command_debug,
+                stderr: Self::failure_details(&primary.stdout, &primary.stderr, &primary.status),
             });
-        }
+        };
 
-        let raw = stdout;
         let text = Self::extract_text(&raw);
 
         let prompt_tokens = prompt.split_whitespace().count();
