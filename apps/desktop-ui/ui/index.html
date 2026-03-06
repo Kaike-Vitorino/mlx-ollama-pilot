@@ -459,8 +459,24 @@
           <article class="agent-card glass">
             <div class="panel-title-row">
               <h3>Skills</h3>
-              <button id="agent-reload-skills-btn" class="ghost-btn">Reload</button>
+              <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+                <button id="agent-check-skills-btn" class="ghost-btn">Check</button>
+                <button id="agent-configure-skills-btn" class="ghost-btn">Configure skills now?</button>
+                <button id="agent-install-skills-btn" class="ghost-btn">Install missing dependencies</button>
+                <button id="agent-reload-skills-btn" class="ghost-btn">Reload</button>
+              </div>
             </div>
+            <label class="field-group" style="margin-top: 12px;">
+              <span>Node manager</span>
+              <select id="agent-node-manager-select" class="input">
+                <option value="npm">npm</option>
+                <option value="pnpm">pnpm</option>
+                <option value="bun">bun</option>
+              </select>
+            </label>
+            <p id="agent-skills-summary" class="meta-note" style="margin: 10px 0 0;">
+              Check das skills pendente.
+            </p>
             <ul id="agent-skills-list" class="agent-toggle-list"></ul>
           </article>
 
