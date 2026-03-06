@@ -11,10 +11,8 @@ from __future__ import annotations
 import argparse
 import contextlib
 import io
-import json
 import platform
 import sys
-from pathlib import Path
 
 
 def log(message: str) -> None:
@@ -57,7 +55,6 @@ def parse_args() -> argparse.Namespace:
 def run_legacy_backend(args: argparse.Namespace) -> str:
     import mlx.core as mx
 
-    model_type = _model_type_from_config(args.model)
     log("backend=legacy (mlx_lm.generate)")
     if args.device == "cpu":
         mx.set_default_device(mx.cpu)
@@ -77,12 +74,8 @@ def run_legacy_backend(args: argparse.Namespace) -> str:
         "sampler": sampler,
         "verbose": False,
     }
-    max_kv_size = max(128, args.max_kv_size)
-    if args.device != "cpu" and model_type in {"qwen3_5_moe", "qwen3_5_moe_text"}:
-        max_kv_size = min(max_kv_size, 256)
-        log(f"clamping max_kv_size to {max_kv_size} for model_type='{model_type}' on non-cpu device")
     kv_kwargs = {
-        "max_kv_size": max_kv_size,
+        "max_kv_size": max(128, args.max_kv_size),
         "kv_bits": max(1, args.kv_bits),
         "kv_group_size": max(1, args.kv_group_size),
         "quantized_kv_start": max(0, args.quantized_kv_start),
@@ -110,45 +103,6 @@ def _is_memory_pressure_error(exc: Exception) -> bool:
             "kiogpucommandbuffercallbackerroroutofmemory",
         )
     )
-
-
-def _model_type_from_config(model_ref: str) -> str:
-    model_path = Path(model_ref)
-    if not model_path.is_dir():
-        return ""
-
-    config_path = model_path / "config.json"
-    if not config_path.exists():
-        return ""
-
-    try:
-        with config_path.open("r", encoding="utf-8") as handle:
-            payload = json.load(handle)
-    except Exception:
-        return ""
-
-    if isinstance(payload, dict):
-        model_type = str(payload.get("model_type") or "").strip()
-        if model_type:
-            return model_type.lower()
-        text_config = payload.get("text_config")
-        if isinstance(text_config, dict):
-            model_type = str(text_config.get("model_type") or "").strip()
-            if model_type:
-                return model_type.lower()
-    return ""
-
-
-def _should_skip_original_backend(model_ref: str) -> tuple[bool, str]:
-    model_type = _model_type_from_config(model_ref)
-    if not model_type:
-        return False, ""
-
-    # Current upstream AirLLM path is unstable for these model families in our integration.
-    unsupported = {"qwen3", "qwen3_5_moe", "qwen3_5_moe_text"}
-    if model_type in unsupported:
-        return True, model_type
-    return False, model_type
 
 
 def _decode_sequences(model, generation_output) -> str:
@@ -211,7 +165,7 @@ def run_original_backend(args: argparse.Namespace) -> str:
             use_cache=True,
             return_dict_in_generate=True,
         )
-        text = str(output).strip()
+        text = _decode_sequences(model, output)
         if text.startswith(args.prompt):
             text = text[len(args.prompt) :].strip()
         return text
@@ -247,38 +201,39 @@ def run_original_backend(args: argparse.Namespace) -> str:
 
 
 def run_backend(args: argparse.Namespace) -> str:
-    def invoke_silenced(fn, fn_args: argparse.Namespace) -> str:
-        # AirLLM/mlx_lm may print setup/progress noise to stdout.
-        # Keep stdout reserved for the final answer payload only.
-        with contextlib.redirect_stdout(io.StringIO()):
-            return fn(fn_args)
+    def invoke_capture_stdout(fn, fn_args: argparse.Namespace) -> str:
+        # Keep stdout clean for final payload, but forward library stdout as logs.
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            result = fn(fn_args)
+        captured = buffer.getvalue().replace("\r", "\n")
+        if captured.strip():
+            for line in captured.splitlines():
+                clean = line.strip()
+                if clean:
+                    log(clean)
+        return result
 
     backend = (args.backend or "auto").strip().lower()
     if backend not in {"auto", "original", "legacy"}:
         backend = "auto"
 
     if backend in {"auto", "original"}:
-        skip_original, model_type = _should_skip_original_backend(args.model)
-        if backend == "auto" and skip_original:
-            log(
-                f"skipping original backend for model_type='{model_type}' due known incompatibility; using legacy"
-            )
-        else:
-            try:
-                return invoke_silenced(run_original_backend, args)
-            except Exception as exc:
-                if backend == "original":
-                    raise
-                log(f"original backend failed ({type(exc).__name__}: {exc}); falling back to legacy")
+        try:
+            return invoke_capture_stdout(run_original_backend, args)
+        except Exception as exc:
+            if backend == "original":
+                raise
+            log(f"original backend failed ({type(exc).__name__}: {exc}); falling back to legacy")
 
     legacy_args = argparse.Namespace(**vars(args))
     try:
-        return invoke_silenced(run_legacy_backend, legacy_args)
+        return invoke_capture_stdout(run_legacy_backend, legacy_args)
     except Exception as exc:
         if legacy_args.device != "cpu" and _is_memory_pressure_error(exc):
             log("legacy backend hit memory pressure; retrying with device=cpu")
             legacy_args.device = "cpu"
-            return invoke_silenced(run_legacy_backend, legacy_args)
+            return invoke_capture_stdout(run_legacy_backend, legacy_args)
         raise
 
 
