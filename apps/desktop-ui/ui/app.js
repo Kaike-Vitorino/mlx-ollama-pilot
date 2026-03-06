@@ -1,5 +1,6 @@
 import { ParticleSystem } from "./particles.js";
 import { createAgentChannelsController } from "./agent-channels.js";
+import { createAgentSkillsController } from "./agent-skills.js";
 
 const STORAGE_DAEMON_URL = "mlxPilotDaemonUrl";
 const STORAGE_CHAT_THREADS = "mlxPilotChatThreadsV2";
@@ -185,6 +186,11 @@ const agentMaxToolsInput = document.getElementById("agent-max-tools-input");
 const agentAggressiveToolsToggle = document.getElementById("agent-aggressive-tools-toggle");
 const agentToolFallbackToggle = document.getElementById("agent-tool-fallback-toggle");
 const agentReloadSkillsBtn = document.getElementById("agent-reload-skills-btn");
+const agentCheckSkillsBtn = document.getElementById("agent-check-skills-btn");
+const agentConfigureSkillsBtn = document.getElementById("agent-configure-skills-btn");
+const agentInstallSkillsBtn = document.getElementById("agent-install-skills-btn");
+const agentNodeManagerSelect = document.getElementById("agent-node-manager-select");
+const agentSkillsSummary = document.getElementById("agent-skills-summary");
 const agentSkillsList = document.getElementById("agent-skills-list");
 const agentToolsList = document.getElementById("agent-tools-list");
 const agentEgressInput = document.getElementById("agent-egress-input");
@@ -302,8 +308,8 @@ let openclawModelsCatalog = {
 let agentProvidersCatalog = [];
 let agentModelsByProvider = {};
 let agentConfigCache = null;
-let agentSkillsCache = [];
 let agentToolsCache = [];
+let agentSkillsController = null;
 
 daemonInput.value = daemonBaseUrl;
 
@@ -5899,6 +5905,9 @@ function applyAgentConfigToForm(config) {
   if (agentToolFallbackToggle) {
     agentToolFallbackToggle.checked = Boolean(config.enable_tool_call_fallback);
   }
+  if (agentNodeManagerSelect) {
+    agentNodeManagerSelect.value = config.node_package_manager || "npm";
+  }
   if (agentEgressInput) {
     agentEgressInput.value = (config.security?.egress_allow_domains || []).join(",");
   }
@@ -5934,7 +5943,11 @@ function collectAgentConfigFromForm() {
     temperature: base.temperature ?? 0.1,
     aggressive_tool_filtering: Boolean(agentAggressiveToolsToggle?.checked),
     enable_tool_call_fallback: Boolean(agentToolFallbackToggle?.checked),
-    enabled_skills: readCheckedNames(agentSkillsList),
+    enabled_skills: agentSkillsController
+      ? agentSkillsController.getSkills().filter((item) => item.enabled).map((item) => item.name)
+      : [],
+    node_package_manager: agentNodeManagerSelect?.value || base.node_package_manager || "npm",
+    skill_overrides: base.skill_overrides || {},
     enabled_tools: readCheckedNames(agentToolsList),
     workspace_root: base.workspace_root || null,
     security: {
@@ -5967,10 +5980,10 @@ async function saveAgentConfig() {
 }
 
 async function loadAgentSkills() {
-  const skills = await fetchJson("/agent/skills", { method: "GET" });
-  agentSkillsCache = Array.isArray(skills) ? skills : [];
-  const checked = enabledSetFromConfig(agentConfigCache?.enabled_skills);
-  renderAgentToggleList(agentSkillsList, agentSkillsCache, checked);
+  if (!agentSkillsController) {
+    return;
+  }
+  await agentSkillsController.loadSkills();
 }
 
 async function loadAgentTools() {
@@ -6010,6 +6023,21 @@ const agentChannelsController = createAgentChannelsController({
   fetchJson,
   promptText: showTextPrompt,
   confirmAction: showConfirmDialog,
+});
+
+agentSkillsController = createAgentSkillsController({
+  elements: {
+    agentSkillsList,
+    agentSkillsSummary,
+    agentNodeManagerSelect,
+  },
+  fetchJson,
+  promptText: showTextPrompt,
+  onStatus: (message) => {
+    if (agentMeta) {
+      agentMeta.textContent = message;
+    }
+  },
 });
 
 async function loadAgentChannelLogs() {
@@ -6579,6 +6607,46 @@ if (agentReloadSkillsBtn) {
     } catch (error) {
       if (agentMeta) {
         agentMeta.textContent = `Falha no reload de skills: ${error.message}`;
+      }
+    }
+  });
+}
+
+if (agentCheckSkillsBtn) {
+  agentCheckSkillsBtn.addEventListener("click", async () => {
+    try {
+      await loadAgentSkills();
+    } catch (error) {
+      if (agentMeta) {
+        agentMeta.textContent = `Falha no check de skills: ${error.message}`;
+      }
+    }
+  });
+}
+
+if (agentInstallSkillsBtn) {
+  agentInstallSkillsBtn.addEventListener("click", async () => {
+    try {
+      if (agentSkillsController) {
+        await agentSkillsController.installMissingSkills();
+      }
+    } catch (error) {
+      if (agentMeta) {
+        agentMeta.textContent = `Falha na instalacao de skills: ${error.message}`;
+      }
+    }
+  });
+}
+
+if (agentConfigureSkillsBtn) {
+  agentConfigureSkillsBtn.addEventListener("click", async () => {
+    try {
+      if (agentSkillsController) {
+        await agentSkillsController.configurePendingSkill();
+      }
+    } catch (error) {
+      if (agentMeta) {
+        agentMeta.textContent = `Falha na configuracao da skill: ${error.message}`;
       }
     }
   });
