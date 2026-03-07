@@ -12,6 +12,15 @@ pub struct PluginToggleRequest {
     pub plugin_id: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct PluginConfigRequest {
+    pub plugin_id: String,
+    #[serde(default)]
+    pub config: Value,
+    #[serde(default)]
+    pub enabled: Option<bool>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct PluginView {
     pub id: String,
@@ -91,6 +100,46 @@ impl PluginManager {
         let mut runtime = self.runtime.lock().await;
         runtime.mark_unloaded(&plugin_id);
         if enabled {
+            runtime.clear_errors(&plugin_id);
+        }
+        let status = runtime.snapshot(&plugin_id, persisted.enabled, persisted.is_configured());
+        Ok(build_plugin_view(descriptor, Some(&persisted), status))
+    }
+
+    pub(crate) async fn update_plugin_config(
+        &self,
+        id_or_alias: &str,
+        config: Value,
+        enabled: Option<bool>,
+    ) -> Result<PluginView, String> {
+        let plugin_id = self
+            .registry
+            .resolve_id(id_or_alias)
+            .ok_or_else(|| format!("unknown plugin '{id_or_alias}'"))?;
+        let descriptor = self
+            .registry
+            .get(&plugin_id)
+            .cloned()
+            .ok_or_else(|| format!("unknown plugin '{id_or_alias}'"))?;
+
+        let mut cfg = self.load_config();
+        let entry = cfg
+            .compatibility
+            .plugins
+            .entry(plugin_id.clone())
+            .or_insert_with(PluginPersistedState::default);
+
+        entry.config = config;
+        if let Some(value) = enabled {
+            entry.enabled = value;
+        }
+        let persisted = entry.clone();
+
+        self.save_config(&cfg).map_err(|error| error.to_string())?;
+
+        let mut runtime = self.runtime.lock().await;
+        runtime.mark_unloaded(&plugin_id);
+        if persisted.enabled {
             runtime.clear_errors(&plugin_id);
         }
         let status = runtime.snapshot(&plugin_id, persisted.enabled, persisted.is_configured());

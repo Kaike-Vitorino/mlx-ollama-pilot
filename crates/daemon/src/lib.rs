@@ -60,7 +60,7 @@ use crate::channels::{
     ChannelResolveRequest, ChannelService, ChannelUpsertAccountRequest, LegacyChannelRemoveRequest,
     LegacyChannelUpsertRequest, MessageSendRequest,
 };
-use crate::plugins::{PluginManager, PluginToggleRequest};
+use crate::plugins::{PluginConfigRequest, PluginManager, PluginToggleRequest};
 
 #[derive(Clone)]
 struct AppState {
@@ -567,6 +567,7 @@ pub async fn run() -> anyhow::Result<()> {
         .route("/agent/plugins", get(agent_plugins))
         .route("/agent/plugins/enable", post(agent_enable_plugin))
         .route("/agent/plugins/disable", post(agent_disable_plugin))
+        .route("/agent/plugins/config", post(agent_configure_plugin))
         .route("/agent/channels/catalog", get(agent_channels_catalog))
         .route("/agent/channels", get(agent_channels))
         .route("/agent/channels/upsert", post(agent_channels_upsert))
@@ -681,6 +682,18 @@ async fn agent_disable_plugin(
     state
         .plugin_manager
         .set_plugin_enabled(&request.plugin_id, false)
+        .await
+        .map(Json)
+        .map_err(AppError::NotFound)
+}
+
+async fn agent_configure_plugin(
+    State(state): State<AppState>,
+    Json(request): Json<PluginConfigRequest>,
+) -> Result<Json<plugins::PluginView>, AppError> {
+    state
+        .plugin_manager
+        .update_plugin_config(&request.plugin_id, request.config, request.enabled)
         .await
         .map(Json)
         .map_err(AppError::NotFound)
