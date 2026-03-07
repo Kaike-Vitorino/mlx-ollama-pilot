@@ -555,6 +555,7 @@ pub async fn run() -> anyhow::Result<()> {
         .route("/agent/skills/reload", post(agent_api::agent_reload_skills))
         .route("/agent/tools", get(agent_api::agent_list_tools))
         .route("/agent/tools/catalog", get(agent_api::agent_tools_catalog))
+        .route("/agent/compat/report", get(agent_api::agent_compat_report))
         .route(
             "/agent/tools/effective-policy",
             get(agent_api::agent_tools_effective_policy),

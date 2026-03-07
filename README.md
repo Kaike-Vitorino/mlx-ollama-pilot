@@ -64,6 +64,7 @@ O repositorio e um workspace Rust com multiplas crates (core, providers e daemon
 - Agent loop completo em Rust com iteracao multi-turn e tool-calling.
 - Loader de skills compativel com `SKILL.md` (sem injetar corpo integral no prompt).
 - Prompt engineering adaptativo para modelos locais/remotos.
+- Compatibility Matrix automatizada para modo `OpenClaw-compatible`.
 - API dedicada do agente:
 - `POST /agent/run`
 - `POST /agent/stream` (stub para streaming de eventos)
@@ -72,6 +73,7 @@ O repositorio e um workspace Rust com multiplas crates (core, providers e daemon
 - `GET /agent/skills`
 - `POST /agent/skills/reload`
 - `GET /agent/tools`
+- `GET /agent/compat/report`
 - `GET /agent/audit`
 - `POST /agent/approve`
 
@@ -97,7 +99,31 @@ O repositorio e um workspace Rust com multiplas crates (core, providers e daemon
 
 - Aba **Agent** no desktop com configuracao de provider, modelo, execucao e seguranca.
 - Controle de skills/tools ativos direto na UI.
+- Control Plane completo para channels, plugins, skills, tools/policies, context/memory e runtime/health.
 - Chat do agente integrado ao fluxo principal do MLX-Pilot.
+
+### OpenClaw-Compatible Mode
+
+- Estado atual validado por `GET /agent/compat/report`.
+- Relatorios gerados automaticamente em:
+- `docs/openclaw-compat-report.json`
+- `docs/openclaw-compat-report.md`
+- Guia operacional: `docs/openclaw-compatible-mode.md`
+- Smoke validation local:
+
+```bash
+node scripts/openclaw-compat-smoke.mjs
+```
+
+- UI smoke validations:
+
+```bash
+cd apps/desktop-ui
+npm run test:e2e:channels-smoke
+npm run test:e2e:skills-smoke
+npm run test:e2e:agent-control-plane
+npm run test:e2e:openclaw-compat
+```
 
 ---
 
