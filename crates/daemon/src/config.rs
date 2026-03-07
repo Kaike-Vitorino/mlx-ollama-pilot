@@ -8,6 +8,8 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+pub const APP_CONFIG_SCHEMA_VERSION: u32 = 2;
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AgentToolScopeOverride {
     #[serde(default)]
@@ -424,6 +426,8 @@ pub struct CompatibilityConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
+    #[serde(default = "default_app_config_schema_version")]
+    pub schema_version: u32,
     pub bind_addr: SocketAddr,
     pub local_provider: String,
     pub models_dir: PathBuf,
@@ -488,6 +492,7 @@ impl Default for AppConfig {
         let openclaw_logs_dir = openclaw_state_dir.join("logs");
 
         Self {
+            schema_version: default_app_config_schema_version(),
             bind_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 11435),
             local_provider: "auto".to_string(),
             models_dir: models_dir.clone(),
@@ -575,8 +580,13 @@ impl AppConfig {
     pub fn load_settings_from(path: &std::path::Path) -> Self {
         if path.exists() {
             if let Ok(content) = fs::read_to_string(path) {
-                if let Ok(config) = serde_json::from_str::<AppConfig>(&content) {
-                    return config;
+                if let Ok(raw) = serde_json::from_str::<Value>(&content) {
+                    if let Ok(mut config) =
+                        serde_json::from_value::<AppConfig>(migrate_app_config_value(raw))
+                    {
+                        normalize_loaded_config(&mut config);
+                        return config;
+                    }
                 }
             }
         }
@@ -587,7 +597,10 @@ impl AppConfig {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let content = serde_json::to_string_pretty(self)?;
+        let mut normalized = self.clone();
+        normalize_loaded_config(&mut normalized);
+        normalized.schema_version = default_app_config_schema_version();
+        let content = serde_json::to_string_pretty(&normalized)?;
         fs::write(path, content)?;
         Ok(())
     }
@@ -951,6 +964,142 @@ fn default_config_object() -> Value {
     Value::Object(Map::new())
 }
 
+fn default_app_config_schema_version() -> u32 {
+    APP_CONFIG_SCHEMA_VERSION
+}
+
+fn migrate_app_config_value(raw: Value) -> Value {
+    let mut base =
+        serde_json::to_value(AppConfig::default()).unwrap_or_else(|_| Value::Object(Map::new()));
+    let mut incoming = match raw {
+        Value::Object(map) => Value::Object(map),
+        _ => return base,
+    };
+
+    let version = incoming
+        .get("schema_version")
+        .and_then(Value::as_u64)
+        .map(|value| value as u32)
+        .unwrap_or(1);
+
+    if version < 2 {
+        migrate_config_v1_to_v2(&mut incoming);
+    }
+
+    merge_json_value(&mut base, &incoming);
+    if let Some(map) = base.as_object_mut() {
+        map.insert(
+            "schema_version".to_string(),
+            Value::from(default_app_config_schema_version()),
+        );
+    }
+    base
+}
+
+fn migrate_config_v1_to_v2(raw: &mut Value) {
+    let Some(root) = raw.as_object_mut() else {
+        return;
+    };
+
+    root.insert(
+        "schema_version".to_string(),
+        Value::from(default_app_config_schema_version()),
+    );
+
+    let agent = root
+        .entry("agent".to_string())
+        .or_insert_with(|| serde_json::to_value(AgentUiConfig::default()).unwrap_or_default());
+    let Some(agent_map) = agent.as_object_mut() else {
+        return;
+    };
+
+    if !agent_map.contains_key("tool_policy") {
+        let enabled_tools = agent_map
+            .get("enabled_tools")
+            .and_then(Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let mut tool_policy = AgentToolPolicyConfig::default();
+        if !enabled_tools.is_empty() {
+            tool_policy.agent_overrides.insert(
+                "default".to_string(),
+                AgentToolScopeOverride {
+                    allow: enabled_tools,
+                    deny: Vec::new(),
+                },
+            );
+        }
+        agent_map.insert(
+            "tool_policy".to_string(),
+            serde_json::to_value(tool_policy).unwrap_or_default(),
+        );
+    }
+
+    if !agent_map.contains_key("security") {
+        agent_map.insert(
+            "security".to_string(),
+            serde_json::to_value(AgentSecurityConfig::default()).unwrap_or_default(),
+        );
+    }
+
+    if !root.contains_key("compatibility") {
+        root.insert(
+            "compatibility".to_string(),
+            serde_json::to_value(CompatibilityConfig::default()).unwrap_or_default(),
+        );
+    }
+}
+
+fn merge_json_value(base: &mut Value, overlay: &Value) {
+    match (base, overlay) {
+        (Value::Object(base_map), Value::Object(overlay_map)) => {
+            for (key, value) in overlay_map {
+                match base_map.get_mut(key) {
+                    Some(existing) => merge_json_value(existing, value),
+                    None => {
+                        base_map.insert(key.clone(), value.clone());
+                    }
+                }
+            }
+        }
+        (base_value, overlay_value) => *base_value = overlay_value.clone(),
+    }
+}
+
+fn normalize_loaded_config(cfg: &mut AppConfig) {
+    cfg.schema_version = default_app_config_schema_version();
+
+    if cfg.agent.tool_policy.profile.trim().is_empty() {
+        cfg.agent.tool_policy.profile = default_tool_profile();
+    }
+
+    if cfg
+        .agent
+        .tool_policy
+        .agent_overrides
+        .get("default")
+        .map(|entry| entry.allow.is_empty() && entry.deny.is_empty())
+        .unwrap_or(true)
+        && !cfg.agent.enabled_tools.is_empty()
+    {
+        cfg.agent.tool_policy.agent_overrides.insert(
+            "default".to_string(),
+            AgentToolScopeOverride {
+                allow: cfg.agent.enabled_tools.clone(),
+                deny: Vec::new(),
+            },
+        );
+    }
+
+    normalize_mlx_command(cfg);
+}
+
 fn json_value_is_configured(value: &Value) -> bool {
     match value {
         Value::Null => false,
@@ -1123,6 +1272,7 @@ fn normalize_mlx_command(cfg: &mut AppConfig) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn compatibility_state_roundtrips_via_custom_settings_path() {
@@ -1173,6 +1323,40 @@ mod tests {
             .get("telegram")
             .expect("channel state")
             .is_configured());
+        assert_eq!(loaded.schema_version, APP_CONFIG_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn legacy_settings_without_schema_version_are_migrated() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("settings.json");
+        let legacy = json!({
+            "mlx_command": "python -m mlx_lm.generate",
+            "mlx_prefix_args": [],
+            "agent": {
+                "provider": "ollama",
+                "model_id": "qwen2.5-coder:7b",
+                "enabled_tools": ["read_file", "exec"],
+                "enabled_skills": ["weather"]
+            }
+        });
+
+        fs::write(
+            &path,
+            serde_json::to_string_pretty(&legacy).expect("serialize legacy"),
+        )
+        .expect("write legacy settings");
+
+        let loaded = AppConfig::load_settings_from(&path);
+
+        assert_eq!(loaded.schema_version, APP_CONFIG_SCHEMA_VERSION);
+        assert_eq!(loaded.mlx_command, default_mlx_command());
+        assert_eq!(
+            loaded.agent.tool_policy.agent_overrides["default"].allow,
+            vec!["read_file".to_string(), "exec".to_string()]
+        );
+        assert!(loaded.compatibility.channels.is_empty());
+        assert_eq!(loaded.agent.security.security_mode, default_security_mode());
     }
 }
 
