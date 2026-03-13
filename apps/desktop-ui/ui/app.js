@@ -584,22 +584,7 @@ function loadQrCodeLibrary() {
     return qrCodeLibraryPromise;
   }
 
-  qrCodeLibraryPromise = new Promise((resolve, reject) => {
-    const script = document.createElement("script");
-    script.src = "https://cdn.jsdelivr.net/npm/qrcode@1.5.4/build/qrcode.min.js";
-    script.async = true;
-    script.onload = () => {
-      if (window.QRCode?.toCanvas) {
-        resolve(window.QRCode);
-      } else {
-        reject(new Error("Biblioteca de QR code indisponivel."));
-      }
-    };
-    script.onerror = () => {
-      reject(new Error("Falha ao carregar a biblioteca de QR code."));
-    };
-    document.head.appendChild(script);
-  });
+  qrCodeLibraryPromise = Promise.reject(new Error("Biblioteca local de QR code indisponivel."));
 
   return qrCodeLibraryPromise;
 }
