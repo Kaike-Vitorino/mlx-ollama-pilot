@@ -86,6 +86,17 @@ export function createAgentChannelsController({
     );
   }
 
+  function extractAccountQrPayload(account = null) {
+    const qrCode = typeof account?.session?.qr_code === "string" && account.session.qr_code.trim()
+      ? account.session.qr_code.trim()
+      : "";
+    const qrDataUrl = typeof account?.session?.qr_image_data_url === "string"
+      && account.session.qr_image_data_url.trim()
+      ? account.session.qr_image_data_url.trim()
+      : "";
+    return { qrCode, qrDataUrl };
+  }
+
   async function presentChannelLoginDialog(channelId, accountId, response) {
     if (typeof showChannelLoginDialog !== "function") {
       return;
@@ -93,11 +104,15 @@ export function createAgentChannelsController({
     const channel = findChannelView(channelId);
     const account = channel?.accounts?.find((entry) => entry.account_id === accountId) || null;
     const details = nonEmptyDetails(response?.details) ? response.details : null;
+    const { qrCode: sessionQrCode, qrDataUrl: sessionQrDataUrl } = extractAccountQrPayload(account);
     const qrCode = typeof details?.qr_code === "string" && details.qr_code.trim()
       ? details.qr_code.trim()
-      : (typeof account?.session?.qr_code === "string" ? account.session.qr_code.trim() : "");
+      : sessionQrCode;
+    const qrDataUrl = typeof details?.qr_image_data_url === "string" && details.qr_image_data_url.trim()
+      ? details.qr_image_data_url.trim()
+      : sessionQrDataUrl;
 
-    if (!qrCode && !details) {
+    if (!qrCode && !qrDataUrl && !details) {
       return;
     }
 
@@ -109,6 +124,7 @@ export function createAgentChannelsController({
       status: response?.status || account?.session?.status || "connected",
       message: response?.message || "",
       qrCode: qrCode || null,
+      qrDataUrl: qrDataUrl || null,
       details,
       sessionState: account?.session || null,
     });
@@ -187,7 +203,7 @@ export function createAgentChannelsController({
         routingLabel: "Routing defaults (JSON)",
         routingPlaceholder: '{"target":"@cliente"}',
         adapterLabel: "Adapter config da sessao (JSON)",
-        adapterPlaceholder: '{"session_dir":"/tmp/whatsapp-ui-proof"}',
+        adapterPlaceholder: '{"backend":"embedded"}',
         steps: [
           "Salve a conta mesmo sem token.",
           "Clique em Conectar QR para abrir a sessao local.",
@@ -330,10 +346,14 @@ export function createAgentChannelsController({
         );
       }
     }
+    if (elements.agentChannelQrImage) {
+      elements.agentChannelQrImage.hidden = true;
+      elements.agentChannelQrImage.removeAttribute("src");
+    }
   }
 
-  function renderSelectedAccountQr(qrCode) {
-    if (!qrCode) {
+  function renderSelectedAccountQr(qrCode, qrDataUrl = "") {
+    if (!qrCode && !qrDataUrl) {
       clearSelectedAccountQr();
       return;
     }
@@ -342,12 +362,29 @@ export function createAgentChannelsController({
       elements.agentChannelQrPanel.hidden = false;
     }
     if (elements.agentChannelQrText) {
-      elements.agentChannelQrText.textContent = qrCode;
+      elements.agentChannelQrText.textContent = qrDataUrl
+        ? "QR image fornecido pelo backend."
+        : qrCode;
     }
     const qrFrame = elements.agentChannelQrCanvas?.parentElement;
     qrFrame?.classList.remove("qr-fallback");
 
+    if (qrDataUrl && elements.agentChannelQrImage) {
+      if (elements.agentChannelQrCanvas) {
+        elements.agentChannelQrCanvas.hidden = true;
+      }
+      elements.agentChannelQrImage.src = qrDataUrl;
+      elements.agentChannelQrImage.hidden = false;
+      return;
+    }
+
+    if (elements.agentChannelQrImage) {
+      elements.agentChannelQrImage.hidden = true;
+      elements.agentChannelQrImage.removeAttribute("src");
+    }
+
     if (typeof renderQrCode === "function" && elements.agentChannelQrCanvas) {
+      elements.agentChannelQrCanvas.hidden = false;
       renderQrCode(elements.agentChannelQrCanvas, qrCode, { width: 220 })
         .catch(() => {
           qrFrame?.classList.add("qr-fallback");
@@ -380,9 +417,7 @@ export function createAgentChannelsController({
     const channel = findChannelView(channelId);
     const account = findAccountView(channelId, accountId);
     const capabilities = channelCapabilitySet(channel, account);
-    const qrCode = typeof account?.session?.qr_code === "string" && account.session.qr_code.trim()
-      ? account.session.qr_code.trim()
-      : "";
+    const { qrCode, qrDataUrl } = extractAccountQrPayload(account);
 
     renderSessionCapabilityBadges(capabilities);
     renderSelectedChannelOnboarding(channel, account);
@@ -477,11 +512,11 @@ export function createAgentChannelsController({
       disabled: !account.session?.status || account.session.status === "idle" || account.session.status === "logged_out",
     });
     setSessionActionButton(elements.agentChannelShowQrBtn, {
-      hidden: !supportsQrLogin(channel, account) || !qrCode,
-      disabled: !qrCode,
+      hidden: !supportsQrLogin(channel, account) || (!qrCode && !qrDataUrl),
+      disabled: !qrCode && !qrDataUrl,
     });
 
-    renderSelectedAccountQr(qrCode);
+    renderSelectedAccountQr(qrCode, qrDataUrl);
   }
 
   function syncSelectedChannelAccount(channelId) {
@@ -651,7 +686,8 @@ export function createAgentChannelsController({
         const health = account.health_state?.status || "-";
         const session = account.session?.status || "-";
         const loginLabel = loginActionLabel(channel, account);
-        const qrCodeReady = typeof account.session?.qr_code === "string" && account.session.qr_code.trim();
+        const { qrCode, qrDataUrl } = extractAccountQrPayload(account);
+        const qrCodeReady = Boolean(qrCode || qrDataUrl);
         const adapterConfigured = nonEmptyObject(account.adapter_config);
         const accountCapabilities = Array.isArray(account.capabilities) && account.capabilities.length
           ? `<div class="agent-skill-badges">${account.capabilities
@@ -765,6 +801,15 @@ export function createAgentChannelsController({
       throw new Error("Selecione um canal e informe o account_id.");
     }
 
+    const adapterConfig = parseOptionalJsonInput(elements.agentChannelAdapterConfigInput?.value, {});
+    const effectiveAdapterConfig = channel === "whatsapp"
+      && adapterConfig
+      && typeof adapterConfig === "object"
+      && !Array.isArray(adapterConfig)
+      && !Object.keys(adapterConfig).length
+      ? { backend: "embedded" }
+      : adapterConfig;
+
     const payload = {
       channel,
       account_id: accountId,
@@ -772,7 +817,7 @@ export function createAgentChannelsController({
       credentials: parseCredentialsInput(elements.agentChannelCredentialsInput?.value),
       metadata: parseOptionalJsonInput(elements.agentChannelMetadataInput?.value, {}),
       routing_defaults: parseOptionalJsonInput(elements.agentChannelRoutingDefaultsInput?.value, {}),
-      adapter_config: parseOptionalJsonInput(elements.agentChannelAdapterConfigInput?.value, {}),
+      adapter_config: effectiveAdapterConfig,
       set_as_default: Boolean(elements.agentChannelSetDefaultToggle?.checked),
     };
 
@@ -838,13 +883,17 @@ export function createAgentChannelsController({
     if (action === "show-qr") {
       const channel = findChannelView(channelId);
       const account = channel?.accounts?.find((entry) => entry.account_id === accountId);
-      if (!account?.session?.qr_code) {
+      const { qrCode, qrDataUrl } = extractAccountQrPayload(account);
+      if (!qrCode && !qrDataUrl) {
         throw new Error("Nenhum QR code disponivel para esta conta.");
       }
       await presentChannelLoginDialog(channelId, accountId, {
         status: account.session.status,
         message: "Escaneie o QR code para concluir a conexao.",
-        details: { qr_code: account.session.qr_code },
+        details: {
+          ...(qrCode ? { qr_code: qrCode } : {}),
+          ...(qrDataUrl ? { qr_image_data_url: qrDataUrl } : {}),
+        },
       });
       return;
     }

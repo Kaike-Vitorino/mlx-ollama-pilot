@@ -885,6 +885,14 @@ img {
   background: #fff;
 }
 
+.agent-channel-qr-image {
+  width: 100%;
+  max-width: 220px;
+  height: auto;
+  border-radius: 10px;
+  background: #fff;
+}
+
 .agent-channel-qr-copy {
   display: grid;
   gap: 8px;
@@ -2816,6 +2824,15 @@ textarea:focus {
 }
 
 .channel-auth-qr-canvas {
+  width: min(260px, 100%);
+  height: auto;
+  border-radius: 18px;
+  background: #ffffff;
+  padding: 14px;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.32);
+}
+
+.channel-auth-qr-image {
   width: min(260px, 100%);
   height: auto;
   border-radius: 18px;

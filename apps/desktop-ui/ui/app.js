@@ -254,6 +254,7 @@ const agentChannelLogoutBtn = document.getElementById("agent-channel-logout-btn"
 const agentChannelShowQrBtn = document.getElementById("agent-channel-show-qr-btn");
 const agentChannelQrPanel = document.getElementById("agent-channel-qr-panel");
 const agentChannelQrCanvas = document.getElementById("agent-channel-qr-canvas");
+const agentChannelQrImage = document.getElementById("agent-channel-qr-image");
 const agentChannelQrText = document.getElementById("agent-channel-qr-text");
 const agentSendChannelSelect = document.getElementById("agent-send-channel");
 const agentSendAccountSelect = document.getElementById("agent-send-account");
@@ -410,7 +411,20 @@ async function fetchJson(path, options = {}) {
     throw createHttpError(response.status, detail);
   }
 
-  return response.json();
+  if (response.status === 204 || response.status === 205) {
+    return null;
+  }
+
+  const text = await response.text();
+  if (!text.trim()) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(text);
+  } catch {
+    return { message: text };
+  }
 }
 
 function delay(ms) {
@@ -584,7 +598,41 @@ function loadQrCodeLibrary() {
     return qrCodeLibraryPromise;
   }
 
-  qrCodeLibraryPromise = Promise.reject(new Error("Biblioteca local de QR code indisponivel."));
+  qrCodeLibraryPromise = new Promise((resolve, reject) => {
+    const resolveIfAvailable = () => {
+      if (window.QRCode?.toCanvas) {
+        resolve(window.QRCode);
+        return true;
+      }
+      return false;
+    };
+
+    if (resolveIfAvailable()) {
+      return;
+    }
+
+    if (!document?.body) {
+      reject(new Error("Biblioteca local de QR code indisponivel."));
+      return;
+    }
+
+    const script = document.createElement("script");
+    script.src = "./vendor/qrcode.bundle.js";
+    script.async = true;
+    script.dataset.qrVendor = "qrcode";
+    script.addEventListener("load", () => {
+      if (!resolveIfAvailable()) {
+        reject(new Error("Biblioteca local de QR code indisponivel."));
+      }
+    }, { once: true });
+    script.addEventListener("error", () => {
+      reject(new Error("Biblioteca local de QR code indisponivel."));
+    }, { once: true });
+    document.body.appendChild(script);
+  }).catch((error) => {
+    qrCodeLibraryPromise = null;
+    throw error;
+  });
 
   return qrCodeLibraryPromise;
 }
@@ -609,6 +657,8 @@ function sanitizeDialogDetails(details = {}, sessionState = null) {
   const merged = {
     ...(details && typeof details === "object" && !Array.isArray(details) ? details : {}),
   };
+  delete merged.qr_code;
+  delete merged.qr_image_data_url;
 
   if (sessionState?.session_dir && !merged.session_dir) {
     merged.session_dir = sessionState.session_dir;
@@ -633,6 +683,7 @@ function showChannelLoginDialog({
   status = "connected",
   message = "",
   qrCode = null,
+  qrDataUrl = null,
   details = null,
   sessionState = null,
 }) {
@@ -667,7 +718,7 @@ function showChannelLoginDialog({
     statusBadge.textContent = status || "connected";
     badges.appendChild(statusBadge);
 
-    if (qrCode) {
+    if (qrCode || qrDataUrl) {
       const qrBadge = document.createElement("span");
       qrBadge.className = "channel-auth-badge";
       qrBadge.textContent = "qr-login";
@@ -687,7 +738,7 @@ function showChannelLoginDialog({
     dialog.appendChild(summary);
 
     let qrRawText = null;
-    if (qrCode) {
+    if (qrCode || qrDataUrl) {
       const qrSection = document.createElement("section");
       qrSection.className = "channel-auth-qr-section";
 
@@ -698,24 +749,32 @@ function showChannelLoginDialog({
 
       const qrFrame = document.createElement("div");
       qrFrame.className = "channel-auth-qr-frame";
-
-      const qrCanvas = document.createElement("canvas");
-      qrCanvas.className = "channel-auth-qr-canvas";
-      qrFrame.appendChild(qrCanvas);
+      if (qrDataUrl) {
+        const qrImage = document.createElement("img");
+        qrImage.className = "channel-auth-qr-image";
+        qrImage.alt = "QRCode de login";
+        qrImage.src = qrDataUrl;
+        qrFrame.appendChild(qrImage);
+      } else {
+        const qrCanvas = document.createElement("canvas");
+        qrCanvas.className = "channel-auth-qr-canvas";
+        qrFrame.appendChild(qrCanvas);
+        renderQrCodeToCanvas(qrCanvas, qrCode, { width: 260 })
+          .catch(() => {
+            qrFrame.classList.add("qr-fallback");
+            qrFrame.textContent = "Nao foi possivel renderizar o QR automaticamente. Use o codigo abaixo.";
+          });
+      }
       qrSection.appendChild(qrFrame);
 
-      qrRawText = document.createElement("code");
-      qrRawText.className = "channel-auth-qr-raw";
-      qrRawText.textContent = qrCode;
-      qrSection.appendChild(qrRawText);
+      if (qrCode) {
+        qrRawText = document.createElement("code");
+        qrRawText.className = "channel-auth-qr-raw";
+        qrRawText.textContent = qrCode;
+        qrSection.appendChild(qrRawText);
+      }
 
       dialog.appendChild(qrSection);
-
-      renderQrCodeToCanvas(qrCanvas, qrCode, { width: 260 })
-        .catch(() => {
-          qrFrame.classList.add("qr-fallback");
-          qrFrame.textContent = "Nao foi possivel renderizar o QR automaticamente. Use o codigo abaixo.";
-        });
     }
 
     const normalizedDetails = sanitizeDialogDetails(details, sessionState);
@@ -6309,6 +6368,7 @@ const agentChannelsController = createAgentChannelsController({
     agentChannelShowQrBtn,
     agentChannelQrPanel,
     agentChannelQrCanvas,
+    agentChannelQrImage,
     agentChannelQrText,
     agentSendChannelSelect,
     agentSendAccountSelect,
