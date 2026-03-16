@@ -3,6 +3,7 @@
 .DS_Store
 .env
 node_modules
+.npm-cache/
 apps/desktop-ui/src-tauri/target
 SourceCode_OpenClaw_NanoBot_And_Plan/
 AI_FOR_MLX_PILOT/

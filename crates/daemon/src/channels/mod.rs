@@ -1,4 +1,5 @@
 pub(crate) mod protocol;
+mod whatsapp_bridge;
 
 use crate::config::{
     AppConfig, ChannelAccountHealthState, ChannelAccountPersistedState, ChannelAccountPolicy,
@@ -23,6 +24,10 @@ use uuid::Uuid;
 use self::protocol::{
     bridge_channel_capabilities, family_for_channel, validate_account_payload,
     CHANNEL_PROTOCOL_VERSION,
+};
+use self::whatsapp_bridge::{
+    whatsapp_login_via_embedded, whatsapp_logout_via_embedded, whatsapp_probe_via_embedded,
+    whatsapp_send_via_embedded,
 };
 
 const CHANNEL_SESSIONS_DIR: &str = "channel-sessions";
@@ -216,6 +221,8 @@ pub struct ChannelSessionState {
     #[serde(default)]
     pub qr_code: Option<String>,
     #[serde(default)]
+    pub qr_image_data_url: Option<String>,
+    #[serde(default)]
     pub connected_at_epoch_ms: Option<u128>,
     #[serde(default)]
     pub disconnected_at_epoch_ms: Option<u128>,
@@ -227,6 +234,7 @@ impl Default for ChannelSessionState {
             status: "not_logged_in".to_string(),
             session_dir: None,
             qr_code: None,
+            qr_image_data_url: None,
             connected_at_epoch_ms: None,
             disconnected_at_epoch_ms: None,
         }
@@ -1336,6 +1344,9 @@ impl ChannelAdapter for WhatsAppAdapter {
     }
 
     async fn login(&self, ctx: AdapterContext) -> Result<AdapterResponse, String> {
+        if let Some(response) = whatsapp_login_via_embedded(&ctx).await? {
+            return Ok(response);
+        }
         std::fs::create_dir_all(ctx.session_root.join("auth"))
             .map_err(|error| error.to_string())?;
         let qr_code = format!("wa://link/{}-{}", ctx.account_id, Uuid::new_v4());
@@ -1347,6 +1358,7 @@ impl ChannelAdapter for WhatsAppAdapter {
                 status: "connected".to_string(),
                 session_dir: Some(ctx.session_root.display().to_string()),
                 qr_code: Some(qr_code),
+                qr_image_data_url: None,
                 connected_at_epoch_ms: Some(epoch_ms_now()),
                 disconnected_at_epoch_ms: None,
             }),
@@ -1354,6 +1366,9 @@ impl ChannelAdapter for WhatsAppAdapter {
     }
 
     async fn logout(&self, ctx: AdapterContext) -> Result<AdapterResponse, String> {
+        if let Some(response) = whatsapp_logout_via_embedded(&ctx).await? {
+            return Ok(response);
+        }
         Ok(AdapterResponse {
             status: "logged_out".to_string(),
             message: "WhatsApp account logged out.".to_string(),
@@ -1362,6 +1377,7 @@ impl ChannelAdapter for WhatsAppAdapter {
                 status: "logged_out".to_string(),
                 session_dir: Some(ctx.session_root.display().to_string()),
                 qr_code: None,
+                qr_image_data_url: None,
                 connected_at_epoch_ms: None,
                 disconnected_at_epoch_ms: Some(epoch_ms_now()),
             }),
@@ -1369,6 +1385,9 @@ impl ChannelAdapter for WhatsAppAdapter {
     }
 
     async fn probe(&self, ctx: AdapterContext) -> Result<ProbeResult, String> {
+        if let Some(result) = whatsapp_probe_via_embedded(&ctx).await? {
+            return Ok(result);
+        }
         let session = ctx.session_root.join("session.json");
         if !session.exists() {
             return Ok(ProbeResult {
@@ -1392,8 +1411,11 @@ impl ChannelAdapter for WhatsAppAdapter {
         &self,
         ctx: AdapterContext,
         target: String,
-        _message: String,
+        message: String,
     ) -> Result<SendResult, String> {
+        if let Some(result) = whatsapp_send_via_embedded(&ctx, &target, &message).await? {
+            return Ok(result);
+        }
         if !ctx.session_root.join("session.json").exists() {
             return Err("WhatsApp account is not logged in".to_string());
         }
@@ -1423,6 +1445,7 @@ impl ChannelAdapter for TokenBotAdapter {
                 status: "connected".to_string(),
                 session_dir: Some(ctx.session_root.display().to_string()),
                 qr_code: None,
+                qr_image_data_url: None,
                 connected_at_epoch_ms: Some(epoch_ms_now()),
                 disconnected_at_epoch_ms: None,
             }),
@@ -1438,6 +1461,7 @@ impl ChannelAdapter for TokenBotAdapter {
                 status: "logged_out".to_string(),
                 session_dir: Some(ctx.session_root.display().to_string()),
                 qr_code: None,
+                qr_image_data_url: None,
                 connected_at_epoch_ms: None,
                 disconnected_at_epoch_ms: Some(epoch_ms_now()),
             }),
@@ -2172,6 +2196,7 @@ fn connected_session_state(ctx: &AdapterContext) -> ChannelSessionState {
         status: "connected".to_string(),
         session_dir: Some(ctx.session_root.display().to_string()),
         qr_code: None,
+        qr_image_data_url: None,
         connected_at_epoch_ms: Some(epoch_ms_now()),
         disconnected_at_epoch_ms: None,
     }
@@ -2182,6 +2207,7 @@ fn logged_out_session_state(ctx: &AdapterContext) -> ChannelSessionState {
         status: "logged_out".to_string(),
         session_dir: Some(ctx.session_root.display().to_string()),
         qr_code: None,
+        qr_image_data_url: None,
         connected_at_epoch_ms: None,
         disconnected_at_epoch_ms: Some(epoch_ms_now()),
     }
