@@ -88,6 +88,7 @@ function createFixtureDom() {
         <div id="agent-channel-qr-panel" hidden>
           <div>
             <canvas id="agent-channel-qr-canvas" width="220" height="220"></canvas>
+            <img id="agent-channel-qr-image" hidden />
           </div>
           <code id="agent-channel-qr-text">-</code>
         </div>
@@ -334,14 +335,16 @@ class FakeChannelBackend {
         action: "remove_account",
         result: "success",
       });
-      return { status: "removed" };
+      return null;
     }
 
     if (path === "/agent/channels/login" && options.method === "POST") {
       const { channel, account } = this.findAccount(payload.channel, payload.account_id);
       account.session.status = "linked";
+      const qrDataUrl = "data:image/png;base64,ZmFrZS1xaA==";
       if (channel.id === "whatsapp") {
-        account.session.qr_code = `wa://link/${account.account_id}-qr`;
+        account.session.qr_image_data_url = qrDataUrl;
+        delete account.session.qr_code;
       }
       this.appendLog({
         channel: channel.id,
@@ -356,7 +359,7 @@ class FakeChannelBackend {
         protocol_version: "v1",
         status: "linked",
         message: "linked",
-        details: channel.id === "whatsapp" ? { qr_code: account.session.qr_code } : {},
+        details: channel.id === "whatsapp" ? { qr_image_data_url: qrDataUrl } : {},
       };
     }
 
@@ -364,6 +367,7 @@ class FakeChannelBackend {
       const { channel, account } = this.findAccount(payload.channel, payload.account_id);
       account.session.status = "logged_out";
       delete account.session.qr_code;
+      delete account.session.qr_image_data_url;
       this.appendLog({
         channel: channel.id,
         account_id: account.account_id,
@@ -481,6 +485,7 @@ function collectElements(document) {
     agentChannelShowQrBtn: document.getElementById("agent-channel-show-qr-btn"),
     agentChannelQrPanel: document.getElementById("agent-channel-qr-panel"),
     agentChannelQrCanvas: document.getElementById("agent-channel-qr-canvas"),
+    agentChannelQrImage: document.getElementById("agent-channel-qr-image"),
     agentChannelQrText: document.getElementById("agent-channel-qr-text"),
     agentSendChannelSelect: document.getElementById("agent-send-channel"),
     agentSendAccountSelect: document.getElementById("agent-send-account"),
@@ -593,14 +598,21 @@ test("channels smoke exercises login, probe, resolve, send, logout, and ambiguit
     assert.equal(loginDialogs.length, 1);
     assert.equal(loginDialogs[0].channelId, "whatsapp");
     assert.equal(loginDialogs[0].accountId, "work");
-    assert.match(loginDialogs[0].qrCode, /wa:\/\/link\/work-qr/);
+    assert.equal(loginDialogs[0].qrCode, null);
+    assert.equal(loginDialogs[0].qrDataUrl, "data:image/png;base64,ZmFrZS1xaA==");
     assert.equal(dom.window.document.getElementById("agent-channel-qr-panel").hidden, false);
-    assert.match(dom.window.document.getElementById("agent-channel-qr-text").textContent, /wa:\/\/link\/work-qr/);
-    assert.equal(dom.window.document.getElementById("agent-channel-qr-canvas").dataset.qrCode, "wa://link/work-qr");
+    assert.match(dom.window.document.getElementById("agent-channel-qr-text").textContent, /QR image fornecido pelo backend/);
+    assert.equal(dom.window.document.getElementById("agent-channel-qr-canvas").hidden, true);
+    assert.equal(dom.window.document.getElementById("agent-channel-qr-image").hidden, false);
+    assert.equal(
+      dom.window.document.getElementById("agent-channel-qr-image").getAttribute("src"),
+      "data:image/png;base64,ZmFrZS1xaA==",
+    );
 
     dom.window.document.getElementById("agent-channel-show-qr-btn").click();
     await flushUi();
     assert.equal(loginDialogs.length, 2);
+    assert.equal(loginDialogs[1].qrDataUrl, "data:image/png;base64,ZmFrZS1xaA==");
 
     dom.window.document.getElementById("agent-send-channel").value = "whatsapp";
     dom.window.document.getElementById("agent-send-channel").dispatchEvent(new dom.window.Event("change", { bubbles: true }));
