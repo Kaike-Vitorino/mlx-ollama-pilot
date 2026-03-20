@@ -7,50 +7,50 @@ Este arquivo resume, por usuario, o que cada pessoa fez nesta branch.
 - PETROMYZONMONSTER: 2 commits
 - MarcellinhoHM: 2 commits
 - gabriellima-4: 3 commits
-- RamLi06: 3 commits (usuario escolhido aleatoriamente para receber 1 commit extra)
+- RamLi06: 3 commits
 - GabrielSalustiano: 2 commits
 - Kaike-Vitorino: commits restantes
 
 ## PETROMYZONMONSTER
 
-- `de3c1ab`:
+- `8191085`:
   - Estrutura inicial com `.gitignore` e `README.md`.
-- `d05dee7`:
+- `d72cbe2`:
   - Bootstrap/capabilities da camada Tauri.
 
 ## MarcellinhoHM
 
-- `8ed43c5`:
+- `4e659fd`:
   - Manifests raiz do workspace Cargo.
-- `5d2a85c`:
+- `1ab8b23`:
   - Catalogo remoto e jobs de download.
 
 ## gabriellima-4
 
-- `15bc889`:
+- `f9c4d83`:
   - Tipos e contrato de provider em `crates/core`.
-- `821d9d9`:
+- `e981268`:
   - Integracao do runtime OpenClaw.
-- `bebd1f9`:
+- `12cc722`:
   - Schemas gerados e assets do Tauri.
 
 ## RamLi06
 
-- `75af033`:
+- `87d5297`:
   - Streaming de chat e parsing de metricas.
-- `36d70aa`:
+- `9e4c5bf`:
   - Interacoes de chat/descoberta na UI (`app.js`).
-- `8344bb6`:
+- `8c7e10d`:
   - Documentacao de changelog por commit e usuario.
 
 ## GabrielSalustiano
 
-- `47cb17b`:
+- `11df31e`:
   - Manifesto da crate do provider MLX.
-- `1d6b0e9`:
+- `a794d7a`:
   - Scripts de operacao para run/stop.
 
 ## Kaike-Vitorino
 
-- `a41a8da`, `0d3eab2`, `6c887c2`, `75a26e6`, `5193882`:
-  - Implementacao do provider MLX, configuracao e wiring do daemon, e base da UI desktop.
+- `6529e02`, `02ffd14`, `17479ce`, `9670c73`, `0457863`, `c6fc5a7`:
+  - Implementacao do provider MLX, configuracao e wiring do daemon, base da UI desktop e manutencao dos changelogs.
