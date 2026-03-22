@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>MLX Pilot</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="bg-layer bg-a"></div>
+    <div class="bg-layer bg-b"></div>
+
+    <div class="app-shell">
+      <aside class="sidebar glass">
+        <div class="brand">
+          <p class="brand-eyebrow">MLX Pilot</p>
+          <h1>Local + Cloud Model Hub</h1>
+          <p class="brand-caption">Selecionar, baixar e conversar com modelos em um unico app.</p>
+        </div>
+
+        <section class="panel-block">
+          <div class="panel-title-row">
+            <h2>Conexao</h2>
+          </div>
+          <label class="field-label" for="daemon-url">Daemon URL</label>
+          <input id="daemon-url" class="input" value="http://127.0.0.1:11435" />
+          <button id="save-url" class="ghost-btn">Salvar</button>
+        </section>
+
+        <section class="panel-block">
+          <div class="panel-title-row">
+            <h2>Modelos Locais</h2>
+            <button id="refresh-models" class="ghost-btn">Atualizar</button>
+          </div>
+          <p id="local-model-count" class="meta-note">-</p>
+          <ul id="models-list" class="models-list"></ul>
+        </section>
+      </aside>
+
+      <main class="main-area">
+        <header class="topbar glass">
+          <div class="tab-list" role="tablist" aria-label="Modo">
+            <button class="tab-btn active" data-tab="chat" role="tab" aria-selected="true">
+              Chat
+            </button>
+            <button class="tab-btn" data-tab="discover" role="tab" aria-selected="false">
+              Descobrir Modelos
+            </button>
+            <button class="tab-btn" data-tab="openclaw" role="tab" aria-selected="false">
+              OpenClaw
+            </button>
+          </div>
+          <div id="status-pill" class="status-pill">pronto</div>
+        </header>
+
+        <section id="panel-chat" class="main-panel active" role="tabpanel">
+          <header class="chat-header glass">
+            <div>
+              <p class="chat-eyebrow">Sessao Atual</p>
+              <h2 id="selected-model-label">Nenhum modelo selecionado</h2>
+            </div>
+          </header>
+
+          <section id="chat-log" class="chat-log glass"></section>
+
+          <form id="chat-form" class="chat-form glass">
+            <textarea
+              id="message-input"
+              placeholder="Escreva seu prompt aqui..."
+              rows="4"
+              required
+            ></textarea>
+            <div class="chat-form-actions">
+              <button id="stop-generation" type="button" class="ghost-btn" disabled>Parar</button>
+              <button type="submit" class="primary-btn">Enviar</button>
+            </div>
+          </form>
+        </section>
+
+        <section id="panel-discover" class="main-panel" role="tabpanel">
+          <header class="discover-header glass">
+            <div>
+              <p class="chat-eyebrow">Catalogo Remoto</p>
+              <h2>Encontre novos modelos para baixar</h2>
+            </div>
+          </header>
+
+          <section class="discover-controls glass">
+            <label class="field-group">
+              <span>Fonte</span>
+              <select id="catalog-source" class="input"></select>
+            </label>
+
+            <label class="field-group field-grow">
+              <span>Busca</span>
+              <input
+                id="catalog-query"
+                class="input"
+                placeholder="Ex: mlx-community qwen coder"
+              />
+            </label>
+
+            <button id="catalog-search-btn" class="primary-btn">Buscar</button>
+          </section>
+
+          <p id="catalog-meta" class="meta-note">Carregando catalogo...</p>
+          <section id="remote-results" class="remote-grid"></section>
+
+          <section class="downloads-panel glass">
+            <div class="panel-title-row">
+              <h3>Downloads</h3>
+              <button id="refresh-downloads" class="ghost-btn">Atualizar</button>
+            </div>
+            <ul id="download-list" class="download-list"></ul>
+          </section>
+        </section>
+
+        <section id="panel-openclaw" class="main-panel" role="tabpanel">
+          <header class="openclaw-header glass">
+            <div>
+              <p class="chat-eyebrow">OpenClaw Native</p>
+              <h2>Logs em tempo real + Chat de desenvolvimento</h2>
+            </div>
+
+            <div class="openclaw-header-actions">
+              <p id="openclaw-status-text" class="meta-note">status: verificando...</p>
+              <button id="refresh-openclaw-status" class="ghost-btn">Atualizar status</button>
+            </div>
+          </header>
+
+          <section class="openclaw-layout">
+            <article class="openclaw-log-panel glass">
+              <div class="panel-title-row">
+                <h3>Logs</h3>
+                <button id="clear-openclaw-log" class="ghost-btn">Limpar</button>
+              </div>
+
+              <div class="openclaw-log-controls">
+                <label class="field-group">
+                  <span>Stream</span>
+                  <select id="openclaw-log-stream" class="input">
+                    <option value="gateway">gateway.log</option>
+                    <option value="error">gateway.err.log</option>
+                    <option value="sync">openclaw-mlx-sync.log</option>
+                  </select>
+                </label>
+
+                <button id="refresh-openclaw-log" class="ghost-btn">Atualizar</button>
+              </div>
+
+              <p id="openclaw-log-meta" class="meta-note">-</p>
+              <pre id="openclaw-log-viewer" class="openclaw-log-viewer"></pre>
+            </article>
+
+            <article class="openclaw-chat-panel glass">
+              <div class="panel-title-row">
+                <h3>Chat com OpenClaw</h3>
+              </div>
+
+              <section id="openclaw-chat-log" class="openclaw-chat-log"></section>
+
+              <form id="openclaw-chat-form" class="openclaw-chat-form">
+                <textarea
+                  id="openclaw-message-input"
+                  rows="3"
+                  placeholder="Converse com o OpenClaw aqui..."
+                  required
+                ></textarea>
+                <div class="chat-form-actions">
+                  <button type="submit" class="primary-btn">Enviar para OpenClaw</button>
+                </div>
+              </form>
+            </article>
+
+            <aside class="openclaw-meta-panel glass">
+              <h3>Skills e Tools</h3>
+              <p class="meta-note">Ultima resposta recebida</p>
+
+              <div class="openclaw-meta-block">
+                <p class="openclaw-meta-label">Modelo</p>
+                <p id="openclaw-provider-model" class="openclaw-meta-value">-</p>
+              </div>
+
+              <div class="openclaw-meta-block">
+                <p class="openclaw-meta-label">Uso de tokens</p>
+                <p id="openclaw-usage" class="openclaw-meta-value">-</p>
+              </div>
+
+              <div class="openclaw-meta-block">
+                <p class="openclaw-meta-label">Skills carregadas</p>
+                <ul id="openclaw-skills" class="chip-list"></ul>
+              </div>
+
+              <div class="openclaw-meta-block">
+                <p class="openclaw-meta-label">Tools disponiveis</p>
+                <ul id="openclaw-tools" class="chip-list"></ul>
+              </div>
+            </aside>
+          </section>
+        </section>
+      </main>
+    </div>
+
+    <template id="message-template">
+      <article class="message-card">
+        <header class="message-role"></header>
+        <div class="message-content"></div>
+        <div class="message-actions hidden">
+          <button class="ghost-btn edit-message-btn" type="button">Editar e regenerar</button>
+        </div>
+      </article>
+    </template>
+
+    <template id="assistant-stream-template">
+      <article class="message-card assistant-stream-card">
+        <header class="message-role">assistant</header>
+
+        <div class="assistant-state-row">
+          <span class="assistant-state-label">aguardando</span>
+          <div class="typing-indicator">
+            <span></span>
+            <span></span>
+            <span></span>
+          </div>
+        </div>
+
+        <section class="assistant-thinking hidden">
+          <h4>thinking</h4>
+          <pre class="assistant-thinking-text"></pre>
+        </section>
+
+        <section class="assistant-answer hidden">
+          <h4>resposta</h4>
+          <pre class="assistant-answer-text"></pre>
+        </section>
+
+        <section class="assistant-metrics hidden">
+          <h4>metricas</h4>
+          <pre class="assistant-metrics-text"></pre>
+        </section>
+      </article>
+    </template>
+
+    <template id="remote-card-template">
+      <article class="remote-card glass">
+        <div class="remote-head">
+          <div>
+            <h3 class="remote-name"></h3>
+            <p class="remote-subtitle"></p>
+          </div>
+          <span class="remote-task"></span>
+        </div>
+
+        <p class="remote-summary"></p>
+
+        <div class="remote-stats">
+          <span class="remote-size"></span>
+          <span class="remote-downloads"></span>
+          <span class="remote-likes"></span>
+        </div>
+
+        <div class="remote-tags"></div>
+
+        <div class="remote-actions">
+          <a class="ghost-btn remote-link" target="_blank" rel="noreferrer">Abrir</a>
+          <button class="primary-btn remote-download-btn">Baixar</button>
+        </div>
+      </article>
+    </template>
+
+    <template id="download-item-template">
+      <li class="download-item">
+        <div class="download-main">
+          <p class="download-model"></p>
+          <p class="download-destination"></p>
+
+          <div class="download-progress-track">
+            <div class="download-progress-fill"></div>
+          </div>
+
+          <p class="download-progress-label"></p>
+        </div>
+
+        <div class="download-meta">
+          <span class="download-status"></span>
+          <p class="download-time"></p>
+          <button class="ghost-btn download-cancel-btn">Cancelar</button>
+        </div>
+      </li>
+    </template>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>
