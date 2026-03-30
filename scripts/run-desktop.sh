@@ -3,6 +3,8 @@ set -euo pipefail
 
 ROOT_DIR="/Users/kaike/mlx-ollama-pilot"
 DAEMON_LOG="/tmp/mlx-ollama-daemon.log"
+SERVICE_LABEL="com.kaike.mlx-ollama-daemon"
+USER_ID="$(id -u)"
 
 source "$HOME/.cargo/env"
 
@@ -12,6 +14,12 @@ if [ -x "/Users/kaike/mlx-env/bin/mlx_lm.generate" ]; then
 fi
 
 cd "$ROOT_DIR"
+
+if launchctl print "gui/${USER_ID}/${SERVICE_LABEL}" >/dev/null 2>&1; then
+  echo "Desativando LaunchAgent ${SERVICE_LABEL} para evitar conflito de porta..."
+  launchctl bootout "gui/${USER_ID}/${SERVICE_LABEL}" >/dev/null 2>&1 || true
+  sleep 1
+fi
 
 RUNNING_PIDS=$(lsof -t -nP -iTCP:11435 -sTCP:LISTEN 2>/dev/null || true)
 if [ -n "$RUNNING_PIDS" ]; then
