@@ -304,6 +304,79 @@ function deriveThreadTitle(content) {
   return `${text.slice(0, 52)}...`;
 }
 
+function renameThread(threadId) {
+  if (isGenerating) {
+    addSystemMessage("Pare a geracao atual antes de renomear uma conversa.");
+    return;
+  }
+
+  const thread = chatThreads.find((entry) => entry.id === threadId);
+  if (!thread) {
+    return;
+  }
+
+  const proposed = window.prompt("Novo nome da conversa:", thread.title || "Nova conversa");
+  if (proposed === null) {
+    return;
+  }
+
+  const normalized = proposed.trim();
+  if (!normalized) {
+    addSystemMessage("Nome invalido. Informe ao menos um caractere.");
+    return;
+  }
+
+  thread.title = normalized;
+  thread.updatedAt = Date.now();
+  persistThreads();
+  renderThreadList();
+  renderSelectedThreadMeta();
+  setStatus("conversa renomeada");
+}
+
+function deleteThread(threadId) {
+  if (isGenerating) {
+    addSystemMessage("Pare a geracao atual antes de apagar uma conversa.");
+    return;
+  }
+
+  const index = chatThreads.findIndex((entry) => entry.id === threadId);
+  if (index === -1) {
+    return;
+  }
+
+  const thread = chatThreads[index];
+
+  if (chatThreads.length === 1) {
+    chatThreads[0] = createThread({ title: "Nova conversa", modelId: selectedModelId });
+    activeThreadId = chatThreads[0].id;
+    persistThreads();
+    renderThreadList();
+    rebuildChatFromThread();
+    setStatus("conversa limpa");
+    return;
+  }
+
+  const confirmed = window.confirm(`Apagar conversa \"${thread.title || "Nova conversa"}\"?`);
+  if (!confirmed) {
+    return;
+  }
+
+  const wasActive = activeThreadId === thread.id;
+  chatThreads.splice(index, 1);
+
+  if (wasActive) {
+    activeThreadId = sortThreadsForView()[0]?.id || chatThreads[0]?.id || null;
+    syncModelWithActiveThread();
+    rebuildChatFromThread();
+  }
+
+  persistThreads();
+  renderThreadList();
+  renderSelectedThreadMeta();
+  setStatus("conversa apagada");
+}
+
 function ensureActiveThread() {
   if (getActiveThread()) {
     return;
@@ -334,7 +407,11 @@ function renderThreadList() {
     const li = document.createElement("li");
     li.className = "history-item";
 
+    const row = document.createElement("div");
+    row.className = "history-item-row";
+
     const button = document.createElement("button");
+    button.className = "history-select-btn";
     if (thread.id === activeThreadId) {
       button.classList.add("active");
     }
@@ -362,7 +439,35 @@ function renderThreadList() {
       rebuildChatFromThread();
     });
 
-    li.appendChild(button);
+    const actions = document.createElement("div");
+    actions.className = "history-item-actions";
+
+    const renameBtn = document.createElement("button");
+    renameBtn.type = "button";
+    renameBtn.className = "ghost-btn history-action-btn";
+    renameBtn.textContent = "Renomear";
+    renameBtn.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      renameThread(thread.id);
+    });
+
+    const deleteBtn = document.createElement("button");
+    deleteBtn.type = "button";
+    deleteBtn.className = "ghost-btn history-action-btn danger";
+    deleteBtn.textContent = "Apagar";
+    deleteBtn.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      deleteThread(thread.id);
+    });
+
+    actions.appendChild(renameBtn);
+    actions.appendChild(deleteBtn);
+
+    row.appendChild(button);
+    row.appendChild(actions);
+    li.appendChild(row);
     chatHistoryList.appendChild(li);
   });
 }
