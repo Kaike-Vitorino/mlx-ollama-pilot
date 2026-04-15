@@ -10,6 +10,10 @@
   const state = {
     daemonUrl: localStorage.getItem('mlxPilotDaemonUrl') || 'http://127.0.0.1:11435',
     models: [],
+    modelsLoaded: false,
+    modelsLoading: false,
+    modelsStale: true,
+    modelsPromise: null,
     currentModel: null,
     messages: [],
     isStreaming: false,
@@ -31,6 +35,7 @@
     tools: [],
     channels: [],
     environmentVars: [],
+    activeDiscoverTab: 'catalog',
   };
 
   // ── API ────────────────────────────────────────────────────
@@ -82,7 +87,7 @@
     // Parallel data loads
     await Promise.allSettled([
       loadDaemonConfig(),
-      loadModels(),
+      loadModels({ force: true }),
       loadAgentConfig(),
       loadSessions(),
       loadPlugins(),
@@ -230,18 +235,52 @@
   });
 
   // ── Models ─────────────────────────────────────────────────
-  async function loadModels() {
-    try {
-      const models = await api('/models');
-      state.models = Array.isArray(models) ? models : [];
-      renderModelPicker();
-      renderInstalledModels();
-    } catch (e) {
-      console.error('Models load failed:', e);
-      state.models = [];
-      renderModelPicker();
-      renderInstalledModels();
-    }
+  async function loadModels({ force = false } = {}) {
+    if (state.modelsLoading) return state.modelsPromise;
+    if (!force && state.modelsLoaded && !state.modelsStale) return state.models;
+
+    state.modelsLoading = true;
+    renderInstalledModels();
+
+    state.modelsPromise = (async () => {
+      try {
+        const models = await api('/models');
+        state.models = Array.isArray(models) ? models : [];
+        state.modelsLoaded = true;
+        state.modelsStale = false;
+        renderModelPicker();
+        renderInstalledModels();
+        return state.models;
+      } catch (e) {
+        console.error('Models load failed:', e);
+        if (!state.modelsLoaded) {
+          state.models = [];
+          renderModelPicker();
+        }
+        renderInstalledModels();
+        throw e;
+      } finally {
+        state.modelsLoading = false;
+        state.modelsPromise = null;
+        renderInstalledModels();
+      }
+    })();
+
+    return state.modelsPromise;
+  }
+
+  function invalidateModels() {
+    state.modelsStale = true;
+  }
+
+  function refreshModelsInBackground() {
+    if (state.modelsLoading) return;
+    void loadModels({ force: true }).catch(() => {});
+  }
+
+  function showInstalledModels() {
+    renderInstalledModels();
+    if (!state.modelsLoaded || state.modelsStale) refreshModelsInBackground();
   }
 
   function renderModelPicker() {
@@ -279,8 +318,19 @@
     const list = document.getElementById('installed-list');
     const count = document.getElementById('installed-count');
     if (!list) return;
-    if (count) count.textContent = `${state.models.length} modelo${state.models.length !== 1 ? 's' : ''} instalado${state.models.length !== 1 ? 's' : ''}`;
+    if (count) {
+      if (!state.modelsLoaded && state.modelsLoading) {
+        count.textContent = 'Carregando modelos...';
+      } else {
+        const suffix = state.modelsLoading ? ' • atualizando...' : '';
+        count.textContent = `${state.models.length} modelo${state.models.length !== 1 ? 's' : ''} instalado${state.models.length !== 1 ? 's' : ''}${suffix}`;
+      }
+    }
     list.innerHTML = '';
+    if (!state.modelsLoaded && state.modelsLoading) {
+      list.innerHTML = '<div style="padding:24px;text-align:center;color:var(--text-tertiary)">Carregando modelos...</div>';
+      return;
+    }
     if (state.models.length === 0) {
       list.innerHTML = '<div style="padding:24px;text-align:center;color:var(--text-tertiary)">Nenhum modelo instalado</div>';
       return;
@@ -304,7 +354,11 @@
     list.querySelectorAll('[data-act="chat"]').forEach(b => b.addEventListener('click', () => { selectModel(b.dataset.id); switchTab('chat'); }));
     list.querySelectorAll('[data-act="del"]').forEach(b => b.addEventListener('click', async () => {
       if (!confirm(`Remover modelo ${b.dataset.id}?`)) return;
-      try { await api(`/models/${encodeURIComponent(b.dataset.id)}`, { method: 'DELETE' }); loadModels(); } catch (e) { alert('Erro: ' + e.message); }
+      try {
+        await api(`/models/${encodeURIComponent(b.dataset.id)}`, { method: 'DELETE' });
+        invalidateModels();
+        refreshModelsInBackground();
+      } catch (e) { alert('Erro: ' + e.message); }
     }));
   }
 
@@ -324,6 +378,7 @@
   async function startDownload(source, modelId) {
     try {
       await api('/catalog/downloads', { method: 'POST', body: JSON.stringify({ source, model_id: modelId }) });
+      invalidateModels();
       alert('Download iniciado: ' + modelId);
     } catch (e) { alert('Erro no download: ' + e.message); }
   }
@@ -902,7 +957,10 @@
     if (tab) { tab.classList.add('active'); tab.setAttribute('aria-selected', 'true'); }
     if (panel) panel.classList.add('active');
 
-    if (target === 'discover') searchCatalog('llama');
+    if (target === 'discover') {
+      searchCatalog('llama');
+      if (state.activeDiscoverTab === 'installed') showInstalledModels();
+    }
     if (target === 'openclaw') { loadRuntimeStatus(); loadOpenClawObservability(); }
     if (target === 'ai-interaction') initAICanvas();
   }
@@ -922,14 +980,18 @@
       document.querySelectorAll('.discover-tab').forEach(t => t.classList.remove('active'));
       tab.classList.add('active');
       const d = tab.dataset.dtab;
+      state.activeDiscoverTab = d;
       document.getElementById('dtab-catalog').style.display = d === 'catalog' ? 'block' : 'none';
       document.getElementById('dtab-installed').style.display = d === 'installed' ? 'block' : 'none';
-      if (d === 'installed') loadModels();
+      if (d === 'installed') showInstalledModels();
     });
   });
 
   // Refresh installed models
-  document.getElementById('refresh-installed')?.addEventListener('click', () => loadModels());
+  document.getElementById('refresh-installed')?.addEventListener('click', () => {
+    invalidateModels();
+    refreshModelsInBackground();
+  });
 
   // ── Catalog Search ─────────────────────────────────────────
   let searchTimeout;
