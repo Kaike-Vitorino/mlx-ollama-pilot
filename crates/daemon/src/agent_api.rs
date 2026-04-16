@@ -17,10 +17,12 @@ use mlx_agent_core::policy::{DefaultPolicyEngine, PolicyConfig, PolicyEngine};
 use mlx_agent_core::registry::ToolRegistry;
 use mlx_agent_core::{AgentError, AgentLoop, AgentLoopConfig};
 use mlx_agent_tools::ExecutionMode;
-use mlx_ollama_core::{ChatMessage, FunctionDef, MessageRole, ModelProvider, RuntimeProviderConfig};
+use mlx_ollama_core::{
+    ChatMessage, FunctionDef, MessageRole, ModelProvider, RuntimeProviderConfig,
+};
 use serde::{Deserialize, Serialize};
-use std::io;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
@@ -646,30 +648,110 @@ const INSTALL_COMMAND_TIMEOUT_SECS_DEFAULT: u64 = 180;
 const INSTALL_DOWNLOAD_TIMEOUT_SECS_DEFAULT: u64 = 60;
 const DEFAULT_AGENT_ID: &str = "default";
 const COMPAT_ENDPOINTS: &[(&str, &str, &str)] = &[
-    ("GET", "/agent/config", "existing agent configuration contract preserved"),
-    ("POST", "/agent/config", "existing configuration mutation contract preserved"),
+    (
+        "GET",
+        "/agent/config",
+        "existing agent configuration contract preserved",
+    ),
+    (
+        "POST",
+        "/agent/config",
+        "existing configuration mutation contract preserved",
+    ),
     ("GET", "/agent/skills", "skill catalog listing preserved"),
-    ("GET", "/agent/skills/check", "skill eligibility inspection preserved"),
-    ("POST", "/agent/skills/install", "skill dependency install flow preserved"),
-    ("POST", "/agent/skills/enable", "skill toggle flow preserved"),
-    ("POST", "/agent/skills/disable", "skill toggle flow preserved"),
+    (
+        "GET",
+        "/agent/skills/check",
+        "skill eligibility inspection preserved",
+    ),
+    (
+        "POST",
+        "/agent/skills/install",
+        "skill dependency install flow preserved",
+    ),
+    (
+        "POST",
+        "/agent/skills/enable",
+        "skill toggle flow preserved",
+    ),
+    (
+        "POST",
+        "/agent/skills/disable",
+        "skill toggle flow preserved",
+    ),
     ("GET", "/agent/tools", "effective tool list preserved"),
-    ("GET", "/agent/tools/catalog", "tool catalog contract preserved"),
-    ("GET", "/agent/tools/effective-policy", "effective policy endpoint preserved"),
-    ("POST", "/agent/tools/profile", "profile switch endpoint preserved"),
-    ("POST", "/agent/tools/allow-deny", "allow/deny mutation preserved"),
+    (
+        "GET",
+        "/agent/tools/catalog",
+        "tool catalog contract preserved",
+    ),
+    (
+        "GET",
+        "/agent/tools/effective-policy",
+        "effective policy endpoint preserved",
+    ),
+    (
+        "POST",
+        "/agent/tools/profile",
+        "profile switch endpoint preserved",
+    ),
+    (
+        "POST",
+        "/agent/tools/allow-deny",
+        "allow/deny mutation preserved",
+    ),
     ("GET", "/agent/plugins", "plugin inventory preserved"),
-    ("POST", "/agent/plugins/enable", "plugin enable mutation preserved"),
-    ("POST", "/agent/plugins/disable", "plugin disable mutation preserved"),
+    (
+        "POST",
+        "/agent/plugins/enable",
+        "plugin enable mutation preserved",
+    ),
+    (
+        "POST",
+        "/agent/plugins/disable",
+        "plugin disable mutation preserved",
+    ),
     ("GET", "/agent/channels", "channel inventory preserved"),
-    ("GET", "/agent/channels/catalog", "channel catalog preserved"),
-    ("POST", "/agent/channels/upsert-account", "channel account mutation preserved"),
-    ("POST", "/agent/channels/login", "channel login flow preserved"),
-    ("POST", "/agent/channels/logout", "channel logout flow preserved"),
-    ("POST", "/agent/channels/probe", "channel probe flow preserved"),
-    ("GET", "/agent/channels/status", "channel status listing preserved"),
-    ("GET", "/agent/channels/capabilities", "channel capabilities preserved"),
-    ("GET", "/agent/context/budget", "budget telemetry endpoint preserved"),
+    (
+        "GET",
+        "/agent/channels/catalog",
+        "channel catalog preserved",
+    ),
+    (
+        "POST",
+        "/agent/channels/upsert-account",
+        "channel account mutation preserved",
+    ),
+    (
+        "POST",
+        "/agent/channels/login",
+        "channel login flow preserved",
+    ),
+    (
+        "POST",
+        "/agent/channels/logout",
+        "channel logout flow preserved",
+    ),
+    (
+        "POST",
+        "/agent/channels/probe",
+        "channel probe flow preserved",
+    ),
+    (
+        "GET",
+        "/agent/channels/status",
+        "channel status listing preserved",
+    ),
+    (
+        "GET",
+        "/agent/channels/capabilities",
+        "channel capabilities preserved",
+    ),
+    (
+        "GET",
+        "/agent/context/budget",
+        "budget telemetry endpoint preserved",
+    ),
     ("POST", "/agent/run", "agent loop execution preserved"),
 ];
 
@@ -1452,7 +1534,8 @@ fn classify_channel_support(
         activation_checklist.push("Provisionar o bridge/webhook real do conector.".to_string());
         activation_checklist
             .push("Configurar endpoint/token no account ou adapter_config.".to_string());
-        activation_checklist.push("Executar /agent/channels/login e /probe no ambiente alvo.".to_string());
+        activation_checklist
+            .push("Executar /agent/channels/login e /probe no ambiente alvo.".to_string());
         return (
             "adapter_ready_external".to_string(),
             false,
@@ -1466,7 +1549,9 @@ fn classify_channel_support(
         notes.push("Fluxo validável localmente com credenciais do tipo bot-token.".to_string());
     }
     if has_qr {
-        notes.push("Fluxo local baseado em sessão/QR disponível para onboarding e probe.".to_string());
+        notes.push(
+            "Fluxo local baseado em sessão/QR disponível para onboarding e probe.".to_string(),
+        );
     }
     if has_probe {
         notes.push("Probe de saúde suportado pelo adapter.".to_string());
@@ -1511,11 +1596,9 @@ fn skill_status(skill: &AgentSkillInfo) -> String {
     {
         return "missing_configuration".to_string();
     }
-    if skill
-        .missing
-        .iter()
-        .any(|item| item.starts_with("bin:") || item.starts_with("anyBin:") || item.starts_with("os:"))
-    {
+    if skill.missing.iter().any(|item| {
+        item.starts_with("bin:") || item.starts_with("anyBin:") || item.starts_with("os:")
+    }) {
         return "missing_dependencies".to_string();
     }
     "pending".to_string()
@@ -1604,7 +1687,9 @@ fn synthetic_context_tools() -> Vec<FunctionDef> {
         .collect()
 }
 
-fn build_context_benchmark(agent_cfg: &super::config::AgentUiConfig) -> AgentCompatContextBenchmark {
+fn build_context_benchmark(
+    agent_cfg: &super::config::AgentUiConfig,
+) -> AgentCompatContextBenchmark {
     let provider_id = "ollama";
     let model_id = "qwen2.5-coder:7b";
     let tool_profile = parse_tool_profile(Some(agent_cfg.tool_policy.profile.as_str()));
@@ -2735,7 +2820,8 @@ async fn execute_agent_request(
         ));
     }
 
-    let primary_result = run_agent_once(state, &agent_cfg, &request, primary, workspace.clone()).await;
+    let primary_result =
+        run_agent_once(state, &agent_cfg, &request, primary, workspace.clone()).await;
     match primary_result {
         Ok(response) => Ok(response),
         Err(err) if !fallback_enabled || err.error != "provider_error" => Err(err),
@@ -2750,7 +2836,8 @@ async fn execute_agent_request(
                 &headers,
             )?;
 
-            let fallback_result = run_agent_once(state, &agent_cfg, &request, fallback, workspace).await;
+            let fallback_result =
+                run_agent_once(state, &agent_cfg, &request, fallback, workspace).await;
             fallback_result.map_err(|fallback_err| {
                 AgentApiError::new(
                     StatusCode::BAD_GATEWAY,
@@ -2797,7 +2884,8 @@ pub async fn agent_stream(
     let state_clone = state.clone();
 
     tokio::spawn(async move {
-        let mut run_task = tokio::spawn(async move { execute_agent_request(&state_clone, request).await });
+        let mut run_task =
+            tokio::spawn(async move { execute_agent_request(&state_clone, request).await });
 
         loop {
             tokio::select! {
@@ -2867,7 +2955,13 @@ pub async fn agent_stream(
         .header("Content-Type", "application/x-ndjson; charset=utf-8")
         .header("Cache-Control", "no-cache")
         .body(body)
-        .map_err(|error| AgentApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "stream_build_failed", Some(error.to_string())))
+        .map_err(|error| {
+            AgentApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "stream_build_failed",
+                Some(error.to_string()),
+            )
+        })
 }
 
 /// GET /agent/providers
@@ -3531,7 +3625,13 @@ pub async fn agent_compat_report(
         .channel_service
         .list_channels()
         .await
-        .map_err(|error| AgentApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "channels_failed", Some(error)))?;
+        .map_err(|error| {
+            AgentApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "channels_failed",
+                Some(error),
+            )
+        })?;
     let plugins = state.plugin_manager.list_plugins().await;
     let catalog = load_skill_catalog(&state, &cfg).await?;
     let node_manager = normalize_node_manager(None, &cfg.agent.node_package_manager);
@@ -3621,7 +3721,8 @@ pub async fn agent_compat_report(
                 id: plugin.id.clone(),
                 severity: "warning".to_string(),
                 message: format!("Plugin '{}' reported runtime errors.", plugin.id),
-                action: "Revisar health/runtime logs e reaplicar a configuracao do plugin.".to_string(),
+                action: "Revisar health/runtime logs e reaplicar a configuracao do plugin."
+                    .to_string(),
             });
         }
     }
@@ -3661,7 +3762,8 @@ pub async fn agent_compat_report(
                 } else if skill.status == "missing_configuration" {
                     "Configurar env/keys pela UI ou vault antes de habilitar a skill.".to_string()
                 } else {
-                    "Atualizar a skill ou revisar os pins/hash de integridade configurados.".to_string()
+                    "Atualizar a skill ou revisar os pins/hash de integridade configurados."
+                        .to_string()
                 },
             });
         }
@@ -3715,7 +3817,10 @@ pub async fn agent_compat_report(
     let endpoint_compatibility = compatibility_endpoints();
     let channels_supported = channel_entries.len();
     let plugins_supported = plugin_entries.len();
-    let tools_supported = tool_profiles.iter().filter(|profile| profile.status == "covered").count();
+    let tools_supported = tool_profiles
+        .iter()
+        .filter(|profile| profile.status == "covered")
+        .count();
     let endpoint_supported = endpoint_compatibility
         .iter()
         .filter(|endpoint| endpoint.backward_compatible)
@@ -3734,14 +3839,8 @@ pub async fn agent_compat_report(
         + skill_subsystem_supported
         + context_supported;
 
-    let critical_gaps = gaps
-        .iter()
-        .filter(|gap| gap.severity == "critical")
-        .count();
-    let warning_gaps = gaps
-        .iter()
-        .filter(|gap| gap.severity == "warning")
-        .count();
+    let critical_gaps = gaps.iter().filter(|gap| gap.severity == "critical").count();
+    let warning_gaps = gaps.iter().filter(|gap| gap.severity == "warning").count();
 
     Ok(Json(AgentCompatReport {
         mode: "openclaw-compatible".to_string(),
@@ -4386,8 +4485,16 @@ mod tests {
     #[test]
     fn run_install_command_reports_permission_failures() {
         let dir = tempdir().unwrap();
+        #[cfg(windows)]
+        let blocked = dir.path().join("blocked-command.exe");
+        #[cfg(not(windows))]
         let blocked = dir.path().join("blocked-command");
+
+        #[cfg(windows)]
+        std::fs::write(&blocked, b"not-a-real-executable").unwrap();
+        #[cfg(not(windows))]
         std::fs::write(&blocked, "#!/bin/sh\necho nope\n").unwrap();
+
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -4400,6 +4507,18 @@ mod tests {
         let result = runtime.block_on(run_install_command(blocked.to_string_lossy().as_ref(), &[]));
         assert!(!result.ok);
         assert!(result.code.is_none());
-        assert!(result.stderr.to_ascii_lowercase().contains("permission"));
+        let stderr = result.stderr.to_ascii_lowercase();
+        assert!(
+            stderr.contains("permission")
+                || stderr.contains("access is denied")
+                || stderr.contains("program not found")
+                || stderr.contains("not a valid win32")
+                || stderr.contains("os error 193")
+                || stderr.contains("os error 216")
+                || stderr.contains("não é compatível")
+                || stderr.contains("not compatible"),
+            "unexpected stderr: {}",
+            result.stderr
+        );
     }
 }

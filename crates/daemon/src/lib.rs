@@ -115,6 +115,54 @@ enum RoutedProvider {
     Ollama,
 }
 
+const WORKSPACE_MARKERS: &[&str] = &[
+    "skills",
+    ".claude/skills",
+    ".openclaw/skills",
+    ".codex/skills",
+];
+
+fn has_workspace_marker(path: &FsPath) -> bool {
+    path.join(".git").exists()
+        || WORKSPACE_MARKERS
+            .iter()
+            .any(|marker| path.join(marker).is_dir())
+}
+
+fn find_workspace_root_from(start: &FsPath) -> Option<FsPathBuf> {
+    start
+        .ancestors()
+        .find(|candidate| has_workspace_marker(candidate))
+        .map(FsPath::to_path_buf)
+}
+
+fn resolve_default_agent_workspace() -> FsPathBuf {
+    if let Ok(value) = std::env::var("APP_AGENT_WORKSPACE") {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            return FsPathBuf::from(trimmed);
+        }
+    }
+
+    if let Ok(cwd) = std::env::current_dir() {
+        if let Some(workspace) = find_workspace_root_from(&cwd) {
+            return workspace;
+        }
+        return cwd;
+    }
+
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            if let Some(workspace) = find_workspace_root_from(parent) {
+                return workspace;
+            }
+            return parent.to_path_buf();
+        }
+    }
+
+    FsPathBuf::new()
+}
+
 #[derive(Debug)]
 struct RoutedModel {
     provider: RoutedProvider,
@@ -446,9 +494,7 @@ pub async fn run() -> anyhow::Result<()> {
         })),
         nanobot_runtime: Arc::new(Mutex::new(NanoBotRuntimeManager::new())),
         agent_state: agent_api::AgentState {
-            default_workspace: std::env::var("APP_AGENT_WORKSPACE")
-                .map(std::path::PathBuf::from)
-                .unwrap_or_else(|_| std::env::current_dir().unwrap_or_default()),
+            default_workspace: resolve_default_agent_workspace(),
             approval: Arc::new(mlx_agent_core::approval::DefaultApprovalService::new()),
             event_bus: Arc::new(mlx_agent_core::EventBus::default()),
             audit: Arc::new(mlx_agent_core::AuditLog::new(
@@ -1060,7 +1106,9 @@ async fn chat_stream(
         RoutedProvider::Llamacpp => {
             spawn_provider_compat_stream(state.llamacpp_provider.clone(), normalized_request)
         }
-        RoutedProvider::Ollama => spawn_ollama_stream(state.ollama_provider.clone(), normalized_request),
+        RoutedProvider::Ollama => {
+            spawn_ollama_stream(state.ollama_provider.clone(), normalized_request)
+        }
     };
 
     let stream = ReceiverStream::new(receiver).map(|event| {
@@ -1080,6 +1128,40 @@ async fn chat_stream(
         .map_err(|error| AppError::NotFound(format!("falha ao criar resposta: {error}")))?;
 
     Ok(response)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{find_workspace_root_from, has_workspace_marker};
+    use std::fs;
+
+    #[test]
+    fn workspace_marker_detects_git_and_skill_roots() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join(".git")).unwrap();
+        assert!(has_workspace_marker(tmp.path()));
+
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join(".claude").join("skills")).unwrap();
+        assert!(has_workspace_marker(tmp.path()));
+    }
+
+    #[test]
+    fn workspace_root_scans_ancestors_for_repo_markers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        let nested = root
+            .join("apps")
+            .join("desktop-ui")
+            .join("src-tauri")
+            .join("target")
+            .join("release");
+        fs::create_dir_all(root.join(".claude").join("skills")).unwrap();
+        fs::create_dir_all(&nested).unwrap();
+
+        let resolved = find_workspace_root_from(&nested).unwrap();
+        assert_eq!(resolved, root);
+    }
 }
 
 fn spawn_ollama_stream(
@@ -1167,7 +1249,11 @@ fn spawn_ollama_stream(
                             }
                         }
 
-                        if payload.get("done").and_then(Value::as_bool).unwrap_or(false) {
+                        if payload
+                            .get("done")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false)
+                        {
                             prompt_tokens = payload
                                 .get("prompt_eval_count")
                                 .and_then(Value::as_u64)
@@ -1288,7 +1374,11 @@ impl OllamaThinkingParser {
         self.carry.clear();
 
         loop {
-            let tag = if self.in_thinking { "</think>" } else { "<think>" };
+            let tag = if self.in_thinking {
+                "</think>"
+            } else {
+                "<think>"
+            };
 
             if let Some(index) = remaining.find(tag) {
                 let head = remaining[..index].to_string();
@@ -1543,9 +1633,14 @@ async fn list_chat_models(state: &AppState) -> Result<Vec<ModelDescriptor>, Prov
         LocalProviderMode::Llamacpp => state.llamacpp_provider.list_models().await,
         LocalProviderMode::Ollama => state.ollama_provider.list_models().await,
         LocalProviderMode::Auto => {
-            let mlx_future = tokio::time::timeout(Duration::from_secs(3), state.mlx_provider.list_models());
-            let llamacpp_future = tokio::time::timeout(Duration::from_secs(3), state.llamacpp_provider.list_models());
-            let ollama_future = tokio::time::timeout(Duration::from_secs(2), state.ollama_provider.list_models());
+            let mlx_future =
+                tokio::time::timeout(Duration::from_secs(3), state.mlx_provider.list_models());
+            let llamacpp_future = tokio::time::timeout(
+                Duration::from_secs(3),
+                state.llamacpp_provider.list_models(),
+            );
+            let ollama_future =
+                tokio::time::timeout(Duration::from_secs(2), state.ollama_provider.list_models());
 
             let (mlx_result, llamacpp_result, ollama_result) =
                 tokio::join!(mlx_future, llamacpp_future, ollama_future);
