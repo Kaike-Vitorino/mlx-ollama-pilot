@@ -130,14 +130,14 @@ impl OllamaProvider {
         self.wait_until_ready().await
     }
 
-    async fn ping_server(&self) -> bool {
+    async fn ping_server_with_timeout(&self, timeout: Duration) -> bool {
         let endpoint = match self.endpoint("/api/version") {
             Ok(value) => value,
             Err(_) => return false,
         };
 
         let client = match reqwest::Client::builder()
-            .timeout(Duration::from_secs(2))
+            .timeout(timeout)
             .build()
         {
             Ok(client) => client,
@@ -150,6 +150,10 @@ impl OllamaProvider {
             .await
             .map(|response| response.status().is_success())
             .unwrap_or(false)
+    }
+
+    async fn ping_server(&self) -> bool {
+        self.ping_server_with_timeout(Duration::from_secs(2)).await
     }
 
     async fn wait_until_ready(&self) -> Result<(), ProviderError> {
@@ -403,7 +407,12 @@ impl ModelProvider for OllamaProvider {
     }
 
     async fn list_models(&self) -> Result<Vec<ModelDescriptor>, ProviderError> {
-        self.ensure_ready().await?;
+        if !self
+            .ping_server_with_timeout(Duration::from_millis(400))
+            .await
+        {
+            return Ok(Vec::new());
+        }
 
         let endpoint = self.endpoint("/api/tags")?;
         let response = self

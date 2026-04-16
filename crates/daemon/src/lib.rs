@@ -14,7 +14,7 @@ use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path as FsPath, PathBuf as FsPathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::Arc;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::body::Body;
 use axum::extract::{Path as AxumPath, Query, State};
@@ -1284,25 +1284,45 @@ async fn list_chat_models(state: &AppState) -> Result<Vec<ModelDescriptor>, Prov
         LocalProviderMode::Llamacpp => state.llamacpp_provider.list_models().await,
         LocalProviderMode::Ollama => state.ollama_provider.list_models().await,
         LocalProviderMode::Auto => {
-            let mlx_models = match state.mlx_provider.list_models().await {
-                Ok(models) => models,
-                Err(error) => {
+            let mlx_future = tokio::time::timeout(Duration::from_secs(3), state.mlx_provider.list_models());
+            let llamacpp_future = tokio::time::timeout(Duration::from_secs(3), state.llamacpp_provider.list_models());
+            let ollama_future = tokio::time::timeout(Duration::from_secs(2), state.ollama_provider.list_models());
+
+            let (mlx_result, llamacpp_result, ollama_result) =
+                tokio::join!(mlx_future, llamacpp_future, ollama_future);
+
+            let mlx_models = match mlx_result {
+                Ok(Ok(models)) => models,
+                Ok(Err(error)) => {
                     warn!("mlx unavailable while listing models in auto mode: {error}");
                     Vec::new()
                 }
-            };
-            let llamacpp_models = match state.llamacpp_provider.list_models().await {
-                Ok(models) => models,
-                Err(error) => {
-                    warn!("llamacpp unavailable while listing models in auto mode: {error}");
+                Err(_) => {
+                    warn!("mlx model listing timed out in auto mode");
                     Vec::new()
                 }
             };
 
-            let ollama_models = match state.ollama_provider.list_models().await {
-                Ok(models) => models,
-                Err(error) => {
+            let llamacpp_models = match llamacpp_result {
+                Ok(Ok(models)) => models,
+                Ok(Err(error)) => {
+                    warn!("llamacpp unavailable while listing models in auto mode: {error}");
+                    Vec::new()
+                }
+                Err(_) => {
+                    warn!("llamacpp model listing timed out in auto mode");
+                    Vec::new()
+                }
+            };
+
+            let ollama_models = match ollama_result {
+                Ok(Ok(models)) => models,
+                Ok(Err(error)) => {
                     debug!("ollama unavailable while listing models in auto mode: {error}");
+                    Vec::new()
+                }
+                Err(_) => {
+                    debug!("ollama model listing timed out in auto mode");
                     Vec::new()
                 }
             };

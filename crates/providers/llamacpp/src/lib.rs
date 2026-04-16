@@ -13,6 +13,7 @@ use reqwest::Url;
 use serde_json::{json, Value};
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
+use tokio::task;
 use tokio::time::sleep;
 use tracing::{debug, warn};
 
@@ -391,8 +392,14 @@ impl ModelProvider for LlamaCppProvider {
             return Ok(Vec::new());
         }
 
-        let files =
-            discover_gguf_models(&self.cfg.models_dir).map_err(|source| ProviderError::Io {
+        let models_dir = self.cfg.models_dir.clone();
+        let files = task::spawn_blocking(move || discover_gguf_models(&models_dir))
+            .await
+            .map_err(|error| ProviderError::Io {
+                context: "joining llama.cpp model discovery task".to_string(),
+                source: io::Error::other(error.to_string()),
+            })?
+            .map_err(|source| ProviderError::Io {
                 context: format!("reading models directory {}", self.cfg.models_dir.display()),
                 source,
             })?;
@@ -575,7 +582,7 @@ fn collect_gguf_files(path: &Path, depth: usize, out: &mut Vec<PathBuf>) -> Resu
         let name = entry.file_name();
         let name = name.to_string_lossy();
 
-        if name.starts_with('.') {
+        if should_skip_model_dir(&name) {
             continue;
         }
 
@@ -583,6 +590,17 @@ fn collect_gguf_files(path: &Path, depth: usize, out: &mut Vec<PathBuf>) -> Resu
     }
 
     Ok(())
+}
+
+fn should_skip_model_dir(name: &str) -> bool {
+    if name.starts_with('.') {
+        return true;
+    }
+
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "blobs" | "manifests" | "xet" | "node_modules" | "target" | "dist" | "tts-venv" | ".venv" | "venv"
+    )
 }
 
 fn extract_host_port(base_url: &str) -> Result<(String, u16), ProviderError> {

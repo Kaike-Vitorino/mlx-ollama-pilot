@@ -1098,6 +1098,144 @@ fn normalize_loaded_config(cfg: &mut AppConfig) {
     }
 
     normalize_mlx_command(cfg);
+    repair_openclaw_paths(cfg);
+}
+
+fn repair_openclaw_paths(cfg: &mut AppConfig) {
+    let resolved_cli_path = resolve_openclaw_cli_path(&cfg.openclaw_cli_path);
+    let repaired_cli = !cfg.openclaw_cli_path.exists() && resolved_cli_path.exists();
+    if repaired_cli {
+        cfg.openclaw_cli_path = resolved_cli_path.clone();
+    }
+
+    let resolved_state_dir = resolve_openclaw_state_dir(&cfg.openclaw_state_dir, &resolved_cli_path);
+    let repaired_state_dir = !cfg.openclaw_state_dir.exists() && resolved_state_dir != cfg.openclaw_state_dir;
+    if repaired_state_dir {
+        cfg.openclaw_state_dir = resolved_state_dir;
+    }
+
+    if let Some(openclaw_root) = cfg
+        .openclaw_state_dir
+        .parent()
+        .and_then(|value| value.parent())
+    {
+        let sibling_cli = openclaw_root.join("openclaw.mjs");
+        if sibling_cli.exists() {
+            cfg.openclaw_cli_path = sibling_cli;
+        }
+    }
+
+    if repaired_cli || repaired_state_dir {
+        let logs_dir = cfg.openclaw_state_dir.join("logs");
+        cfg.openclaw_gateway_log = logs_dir.join("gateway.log");
+        cfg.openclaw_error_log = logs_dir.join("gateway.err.log");
+        cfg.openclaw_sync_log = default_app_data_dir()
+            .join("logs")
+            .join("openclaw-mlx-sync.log");
+    }
+}
+
+fn resolve_openclaw_cli_path(current: &PathBuf) -> PathBuf {
+    if current.exists()
+        && current
+            .parent()
+            .map(|root| root.join("deploy").join("data").exists())
+            .unwrap_or(false)
+    {
+        return current.clone();
+    }
+
+    let mut candidates = Vec::new();
+
+    if let Some(parent) = current.parent() {
+        candidates.push(parent.join("openclaw.mjs"));
+    }
+
+    if let Ok(cwd) = env::current_dir() {
+        candidates.push(cwd.join("openclaw").join("openclaw.mjs"));
+        candidates.push(cwd.join("..").join("openclaw").join("openclaw.mjs"));
+        candidates.push(
+            cwd.join("..")
+                .join("AI_For_MLX-Pilot")
+                .join("openclaw")
+                .join("openclaw.mjs"),
+        );
+    }
+
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    if let Some(repo_root) = manifest_dir.parent().and_then(|value| value.parent()) {
+        if let Some(ai_root) = repo_root.parent() {
+            candidates.push(ai_root.join("openclaw").join("openclaw.mjs"));
+            candidates.push(
+                ai_root
+                    .join("AI_For_MLX-Pilot")
+                    .join("openclaw")
+                    .join("openclaw.mjs"),
+            );
+        }
+    }
+
+    if let Some(home) = home_dir() {
+        candidates.push(home.join("openclaw").join("openclaw.mjs"));
+        candidates.push(home.join("prod").join("openclaw").join("openclaw.mjs"));
+        candidates.push(home.join("mlx-ollama-pilot").join("openclaw").join("openclaw.mjs"));
+    }
+
+    let existing = dedupe_paths(candidates)
+        .into_iter()
+        .filter(|candidate| candidate.exists())
+        .collect::<Vec<_>>();
+
+    existing
+        .iter()
+        .find(|candidate| {
+            candidate
+                .parent()
+                .map(|root| root.join("deploy").join("data").exists())
+                .unwrap_or(false)
+        })
+        .cloned()
+        .or_else(|| existing.into_iter().next())
+        .unwrap_or_else(|| current.clone())
+}
+
+fn resolve_openclaw_state_dir(current: &PathBuf, cli_path: &PathBuf) -> PathBuf {
+    if current.exists() {
+        return current.clone();
+    }
+
+    let mut candidates = Vec::new();
+
+    if let Some(root) = cli_path.parent() {
+        candidates.push(root.join("deploy").join("data"));
+        candidates.push(root.join("state"));
+    }
+
+    let fallback = default_openclaw_state_dir();
+    candidates.push(fallback.clone());
+
+    first_existing_path(candidates).unwrap_or_else(|| {
+        cli_path
+            .parent()
+            .map(|root| root.join("deploy").join("data"))
+            .unwrap_or(fallback)
+    })
+}
+
+fn first_existing_path(candidates: Vec<PathBuf>) -> Option<PathBuf> {
+    dedupe_paths(candidates)
+        .into_iter()
+        .find(|candidate| candidate.exists())
+}
+
+fn dedupe_paths(candidates: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut seen = BTreeMap::<String, PathBuf>::new();
+    for candidate in candidates {
+        let key = candidate.to_string_lossy().to_ascii_lowercase();
+        seen.entry(key).or_insert(candidate);
+    }
+
+    seen.into_values().collect()
 }
 
 fn json_value_is_configured(value: &Value) -> bool {

@@ -143,6 +143,17 @@ impl MlxProvider {
         })
     }
 
+    fn should_skip_model_dir(name: &str) -> bool {
+        if name.starts_with('.') {
+            return true;
+        }
+
+        matches!(
+            name.to_ascii_lowercase().as_str(),
+            "blobs" | "manifests" | "xet" | "node_modules" | "target" | "dist" | "tts-venv" | ".venv" | "venv"
+        )
+    }
+
     fn format_size(bytes: u64) -> String {
         const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
         format!("{:.1} GiB", bytes as f64 / GIB)
@@ -667,7 +678,7 @@ impl ModelProvider for MlxProvider {
             }
 
             let name = entry.file_name().to_string_lossy().to_string();
-            if name.starts_with('.') {
+            if Self::should_skip_model_dir(&name) {
                 continue;
             }
 

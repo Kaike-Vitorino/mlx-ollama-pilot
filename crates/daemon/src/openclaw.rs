@@ -88,7 +88,7 @@ impl OpenClawRuntime {
         let cli_exists = self.cfg.cli_path.exists();
         let state_dir_exists = self.cfg.state_dir.exists();
         let mut response = OpenClawStatusResponse {
-            available: false,
+            available: cli_exists,
             cli_path: self.cfg.cli_path.display().to_string(),
             cli_exists,
             state_dir: self.cfg.state_dir.display().to_string(),
@@ -109,22 +109,11 @@ impl OpenClawRuntime {
             return response;
         }
 
-        let health_timeout = Duration::from_secs(12);
-        let args = vec![
-            "gateway".to_string(),
-            "call".to_string(),
-            "--json".to_string(),
-            "health".to_string(),
-        ];
-
-        match self.run_command_json(args, health_timeout).await {
-            Ok(health) => {
-                response.available = true;
-                response.health = Some(health);
-            }
-            Err(error) => {
-                response.error = Some(error.to_string());
-            }
+        if !state_dir_exists {
+            response.error = Some(format!(
+                "openclaw state dir nao encontrado em {}",
+                self.cfg.state_dir.display()
+            ));
         }
 
         response
