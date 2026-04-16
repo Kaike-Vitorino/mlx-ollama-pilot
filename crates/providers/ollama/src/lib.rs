@@ -498,6 +498,7 @@ impl OllamaProvider {
     ) -> Result<reqwest::Response, ProviderError> {
         let mut body = self.build_chat_request(model_id, messages, options, None)?;
         body.stream = true;
+        body.think = Some(true);
         self.ensure_ready().await?;
 
         let endpoint = self.endpoint("/api/chat")?;
@@ -668,7 +669,7 @@ impl OllamaProvider {
             model: model_id.to_string(),
             messages: mapped_messages,
             stream: false,
-            think: Some(true),
+            think: None,
             options: Some(OllamaOptions {
                 temperature: options.temperature,
                 max_tokens: options.max_tokens,
