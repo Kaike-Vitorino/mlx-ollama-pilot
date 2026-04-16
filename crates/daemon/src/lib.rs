@@ -1203,7 +1203,7 @@ fn spawn_ollama_stream(
         let mut prompt_tokens = 0_usize;
         let mut completion_tokens = 0_usize;
         let mut total_latency_ms = started.elapsed().as_millis() as u64;
-        let mut status_sent = false;
+        let mut answer_status_sent = false;
         let mut response = response;
 
         loop {
@@ -1235,15 +1235,28 @@ fn spawn_ollama_stream(
                             .pointer("/message/content")
                             .and_then(Value::as_str)
                             .unwrap_or_default();
+                        let thinking = payload
+                            .pointer("/message/thinking")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default();
 
-                        if !status_sent && !content.is_empty() {
-                            status_sent = true;
-                            if tx.send(ChatStreamEvent::status("answering")).await.is_err() {
-                                return;
-                            }
+                        if !thinking.is_empty()
+                            && tx
+                                .send(ChatStreamEvent::thinking_delta(thinking.to_string()))
+                                .await
+                                .is_err()
+                        {
+                            return;
                         }
 
                         for event in parser.push(content) {
+                            let is_answer = event.event == "answer_delta";
+                            if is_answer && !answer_status_sent {
+                                answer_status_sent = true;
+                                if tx.send(ChatStreamEvent::status("answering")).await.is_err() {
+                                    return;
+                                }
+                            }
                             if tx.send(event).await.is_err() {
                                 return;
                             }
@@ -1307,8 +1320,31 @@ fn spawn_ollama_stream(
                                     .pointer("/message/content")
                                     .and_then(Value::as_str)
                                     .unwrap_or_default();
+                                let thinking = payload
+                                    .pointer("/message/thinking")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or_default();
+
+                                if !thinking.is_empty()
+                                    && tx
+                                        .send(ChatStreamEvent::thinking_delta(
+                                            thinking.to_string(),
+                                        ))
+                                        .await
+                                        .is_err()
+                                {
+                                    return;
+                                }
 
                                 for event in parser.push(content) {
+                                    let is_answer = event.event == "answer_delta";
+                                    if is_answer && !answer_status_sent {
+                                        answer_status_sent = true;
+                                        if tx.send(ChatStreamEvent::status("answering")).await.is_err()
+                                        {
+                                            return;
+                                        }
+                                    }
                                     if tx.send(event).await.is_err() {
                                         return;
                                     }
@@ -1747,7 +1783,8 @@ async fn route_model_request(
     state: &AppState,
     model_id: &str,
 ) -> Result<RoutedModel, ProviderError> {
-    let trimmed = model_id.trim();
+    let (normalized_input, display_provider) = normalize_display_model_id(model_id);
+    let trimmed = normalized_input.as_str();
     if trimmed.is_empty() {
         return Err(ProviderError::InvalidRequest {
             details: "model_id cannot be empty".to_string(),
@@ -1772,6 +1809,13 @@ async fn route_model_request(
         return Ok(RoutedModel {
             provider: RoutedProvider::Llamacpp,
             normalized_model_id: normalized.trim().to_string(),
+        });
+    }
+
+    if let Some(provider) = display_provider {
+        return Ok(RoutedModel {
+            provider,
+            normalized_model_id: trimmed.to_string(),
         });
     }
 
@@ -1867,6 +1911,24 @@ async fn route_model_request(
         provider: RoutedProvider::Mlx,
         normalized_model_id: trimmed.to_string(),
     })
+}
+
+fn normalize_display_model_id(model_id: &str) -> (String, Option<RoutedProvider>) {
+    let trimmed = model_id.trim();
+
+    if let Some(value) = trimmed.strip_suffix(" [Ollama]") {
+        return (value.trim().to_string(), Some(RoutedProvider::Ollama));
+    }
+
+    if let Some(value) = trimmed.strip_suffix(" [MLX]") {
+        return (value.trim().to_string(), Some(RoutedProvider::Mlx));
+    }
+
+    if let Some(value) = trimmed.strip_suffix(" [llama.cpp]") {
+        return (value.trim().to_string(), Some(RoutedProvider::Llamacpp));
+    }
+
+    (trimmed.to_string(), None)
 }
 
 fn looks_like_mlx_model_id(model_id: &str) -> bool {

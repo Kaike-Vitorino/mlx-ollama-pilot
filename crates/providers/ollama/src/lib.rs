@@ -324,6 +324,8 @@ struct OllamaChatRequestBody {
     messages: Vec<OllamaChatMessage>,
     stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    think: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     options: Option<OllamaOptions>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     tools: Vec<OllamaTool>,
@@ -666,6 +668,7 @@ impl OllamaProvider {
             model: model_id.to_string(),
             messages: mapped_messages,
             stream: false,
+            think: Some(true),
             options: Some(OllamaOptions {
                 temperature: options.temperature,
                 max_tokens: options.max_tokens,
