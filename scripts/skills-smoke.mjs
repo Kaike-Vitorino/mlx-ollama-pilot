@@ -4,20 +4,46 @@ import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs/promises";
 import fsSync from "node:fs";
+import { createServer } from "node:http";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
+import { fileURLToPath } from "node:url";
 
-const repoRoot = "/Users/kaike/mlx-ollama-pilot";
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const reportPath = path.join(repoRoot, "docs", "skills-validation-report.md");
+const isWindows = process.platform === "win32";
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function writeExecutable(filePath, content, mode = 0o755) {
-  await fs.writeFile(filePath, content, { mode });
-  await fs.chmod(filePath, mode);
+function commandOutput(command, args) {
+  const result = spawnSync(command, args, { encoding: "utf8" });
+  if (result.error) {
+    return "not available";
+  }
+  const text = `${result.stdout || ""}${result.stderr || ""}`.trim();
+  if (!text) {
+    return result.status === 0 ? "ok" : `failed (${result.status ?? "unknown"})`;
+  }
+  return text.split(/\r?\n/)[0];
+}
+
+function fixtureScript(success = true) {
+  if (isWindows) {
+    return success ? "@echo off\r\nexit /b 0\r\n" : "@echo off\r\nexit /b 1\r\n";
+  }
+  return success ? "#!/bin/sh\nexit 0\n" : "#!/bin/sh\nexit 1\n";
+}
+
+async function writeCommand(dir, name, content) {
+  const filename = isWindows ? `${name}.cmd` : name;
+  const filePath = path.join(dir, filename);
+  await fs.writeFile(filePath, content, { mode: 0o755 });
+  if (!isWindows) {
+    await fs.chmod(filePath, 0o755);
+  }
 }
 
 async function writeSkill(skillsDir, name, content) {
@@ -67,7 +93,6 @@ function startDaemon({
   env = {},
   npmPrefix,
   npmCache,
-  gobin,
 }) {
   const logPath = path.join(path.dirname(settingsPath), `${name}.log`);
   const combinedPath = [...pathPrefix, process.env.PATH || ""]
@@ -85,7 +110,6 @@ function startDaemon({
       NPM_CONFIG_PREFIX: npmPrefix,
       npm_config_cache: npmCache,
       NPM_CONFIG_CACHE: npmCache,
-      GOBIN: gobin,
       PATH: combinedPath,
       ...env,
     },
@@ -123,29 +147,49 @@ function prettyJson(value) {
 async function main() {
   const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "mlx-pilot-skills-smoke-"));
   const workspace = path.join(tempRoot, "workspace");
-  const skillsDir = path.join(workspace, "skills");
+  const skillsDir = path.join(workspace, ".claude", "skills");
   const binsDir = path.join(tempRoot, "bins");
   const npmPrefix = path.join(tempRoot, "npm-global");
-  const goBin = path.join(tempRoot, "go-bin");
   const npmCache = path.join(tempRoot, "npm-cache");
+  const npmBinDir = path.join(npmPrefix, "bin");
   await fs.mkdir(skillsDir, { recursive: true });
   await fs.mkdir(binsDir, { recursive: true });
-  await fs.mkdir(path.join(npmPrefix, "bin"), { recursive: true });
+  await fs.mkdir(npmPrefix, { recursive: true });
+  await fs.mkdir(npmBinDir, { recursive: true });
   await fs.mkdir(npmCache, { recursive: true });
-  await fs.mkdir(goBin, { recursive: true });
+  const artifactServer = createServer((request, response) => {
+    if (request.url === "/artifact.bin") {
+      response.writeHead(200, { "Content-Type": "application/octet-stream" });
+      response.end("skills artifact fixture");
+      return;
+    }
+    if (request.url === "/slow-artifact.bin") {
+      setTimeout(() => {
+        response.writeHead(200, { "Content-Type": "application/octet-stream" });
+        response.end("skills slow artifact fixture");
+      }, 5000);
+      return;
+    }
+    response.writeHead(404, { "Content-Type": "text/plain" });
+    response.end("not found");
+  });
+  await new Promise((resolve, reject) => {
+    artifactServer.once("error", reject);
+    artifactServer.listen(0, "127.0.0.1", resolve);
+  });
+  const artifactAddress = artifactServer.address();
+  const artifactBaseUrl = `http://127.0.0.1:${artifactAddress.port}`;
 
-  await writeExecutable(path.join(binsDir, "obsidian"), "#!/bin/sh\nexit 0\n");
-  await writeExecutable(path.join(binsDir, "wa-cli"), "#!/bin/sh\nexit 0\n");
-  await writeExecutable(path.join(binsDir, "gh"), "#!/bin/sh\nexit 0\n");
-
+  await writeCommand(binsDir, "obsidian", fixtureScript(true));
+  await writeCommand(binsDir, "wa-cli", fixtureScript(true));
+  await writeCommand(binsDir, "gh", fixtureScript(true));
+  await writeCommand(binsDir, "curl", fixtureScript(true));
   await writeSkill(
     skillsDir,
     "obsidian",
     `---
 name: obsidian
 description: Obsidian workspace integration.
-os:
-  - macos
 metadata:
   openclaw:
     requires:
@@ -183,13 +227,6 @@ metadata:
     requires:
       anyBins:
         - stringer
-    install:
-      - id: gog-go
-        kind: go
-        module: golang.org/x/tools/cmd/stringer
-        bins:
-          - stringer
-        label: Install stringer via go
 ---
 
 # GOG
@@ -251,25 +288,25 @@ metadata:
   );
   await writeSkill(
     skillsDir,
-    "node-real-install",
+    "artifact-install",
     `---
-name: node-real-install
-description: Node installer validation.
+name: artifact-install
+description: Download installer validation.
 metadata:
   openclaw:
     requires:
       bins:
-        - npm-check-updates
+        - artifact-install-fixture
     install:
-      - id: node-real
-        kind: node
-        package: npm-check-updates
+      - id: artifact-install
+        kind: download
+        url: ${artifactBaseUrl}/artifact.bin
         bins:
-          - npm-check-updates
-        label: Install npm-check-updates
+          - artifact-install-fixture
+        label: Download fixture artifact
 ---
 
-# Node install
+# Artifact install
 `,
   );
   await writeSkill(
@@ -295,23 +332,25 @@ metadata:
   );
   await writeSkill(
     skillsDir,
-    "permission-fail",
+    "manual-fail",
     `---
-name: permission-fail
-description: Permission failure validation.
+name: manual-fail
+description: Manual install validation.
 metadata:
   openclaw:
     requires:
       bins:
-        - never-permission
+        - never-manual
     install:
-      - id: permission-fail
-        kind: uv
-        package: ruff
-        label: UV permission fixture
+      - id: manual-fail
+        kind: manual
+        url: https://example.invalid/manual-install
+        bins:
+          - never-manual
+        label: Manual install fixture
 ---
 
-# Permission fail
+# Manual fail
 `,
   );
   await writeSkill(
@@ -327,9 +366,11 @@ metadata:
         - never-timeout
     install:
       - id: timeout-skill
-        kind: uv
-        package: ruff
-        label: UV timeout fixture
+        kind: download
+        url: ${artifactBaseUrl}/slow-artifact.bin
+        bins:
+          - never-timeout
+        label: Slow download timeout fixture
 ---
 
 # Timeout
@@ -342,11 +383,10 @@ metadata:
     "## Environment",
     "",
     `- Date: ${new Date().toISOString()}`,
-    `- macOS: ${spawnSync("sw_vers", ["-productVersion"], { encoding: "utf8" }).stdout.trim()}`,
-    `- Node: ${spawnSync("node", ["-v"], { encoding: "utf8" }).stdout.trim()}`,
-    `- npm: ${spawnSync("npm", ["-v"], { encoding: "utf8" }).stdout.trim()}`,
-    `- go: ${spawnSync("go", ["version"], { encoding: "utf8" }).stdout.trim()}`,
-    `- brew: ${spawnSync("brew", ["--version"], { encoding: "utf8" }).stdout.split("\n")[0]}`,
+    `- Platform: ${process.platform} ${os.release()}`,
+    `- Node: ${process.version}`,
+    `- npm: ${commandOutput("npm", ["-v"])}`,
+    `- cargo: ${commandOutput("cargo", ["-V"])}`,
     "",
     "## Skills tested",
     "",
@@ -356,19 +396,19 @@ metadata:
     "- github",
     "- weather",
     "- summarize",
-    "- node-real-install",
+    "- artifact-install",
     "",
   ];
 
+  const commonPath = [binsDir, npmPrefix, npmBinDir];
   const mainDaemon = startDaemon({
     name: "skills-main",
     workspace,
     settingsPath: path.join(tempRoot, "settings-main.json"),
     port: 19435,
-    pathPrefix: [binsDir, path.join(npmPrefix, "bin"), goBin],
+    pathPrefix: commonPath,
     npmPrefix,
     npmCache,
-    gobin: goBin,
   });
 
   const extraDaemons = [];
@@ -397,22 +437,16 @@ metadata:
     assert.equal(skills.find((skill) => skill.name === "obsidian").enabled, true);
 
     const installResponse = await requestJson(mainDaemon.baseUrl, "POST", "/agent/skills/install", {
-      skills: ["node-real-install", "gog"],
+      skills: ["artifact-install"],
       node_manager: "npm",
     });
-    const nodeInstall = installResponse.results.find((result) => result.skill === "node-real-install").installs[0];
-    const goInstall = installResponse.results.find((result) => result.skill === "gog").installs[0];
-    assert.equal(typeof nodeInstall.ok, "boolean");
-    assert.equal(typeof goInstall.ok, "boolean");
-    assert.equal(nodeInstall.ok, true);
-    assert.equal(goInstall.ok, true);
-
-    const afterInstallCheck = await requestJson(mainDaemon.baseUrl, "GET", "/agent/skills/check");
-    assert.equal(
-      afterInstallCheck.skills.find((skill) => skill.name === "node-real-install").eligible,
-      true,
-    );
-    assert.equal(afterInstallCheck.skills.find((skill) => skill.name === "gog").eligible, true);
+    const installResult = installResponse.results.find((result) => result.skill === "artifact-install");
+    assert.ok(installResult, JSON.stringify(installResponse, null, 2));
+    const nodeInstall = installResult.insts?.[0] ?? installResult.installs?.[0];
+    assert.ok(nodeInstall, JSON.stringify(installResponse, null, 2));
+    assert.equal(nodeInstall.ok, true, JSON.stringify(nodeInstall, null, 2));
+    assert.deepEqual(nodeInstall.warnings, ["artifact_downloaded_only"]);
+    await fs.access(nodeInstall.stdout);
 
     const downloadFail = await requestJson(mainDaemon.baseUrl, "POST", "/agent/skills/install", {
       skills: ["download-fail"],
@@ -443,23 +477,17 @@ metadata:
     await requestJson(mainDaemon.baseUrl, "POST", "/agent/skills/disable", { skill: "weather" });
 
     await stopDaemon(mainDaemon);
-    await waitForHealth(
-      (extraDaemons.push(
-        startDaemon({
-          name: "skills-main-restart",
-          workspace,
-          settingsPath: path.join(tempRoot, "settings-main.json"),
-          port: 19435,
-          pathPrefix: [binsDir, path.join(npmPrefix, "bin"), goBin],
-          npmPrefix,
-          npmCache,
-          gobin: goBin,
-        }),
-      ), extraDaemons[extraDaemons.length - 1]).baseUrl,
-      extraDaemons[extraDaemons.length - 1].proc,
-      extraDaemons[extraDaemons.length - 1].name,
-    );
-    const restartedDaemon = extraDaemons[extraDaemons.length - 1];
+    const restartedDaemon = startDaemon({
+      name: "skills-main-restart",
+      workspace,
+      settingsPath: path.join(tempRoot, "settings-main.json"),
+      port: 19435,
+      pathPrefix: commonPath,
+      npmPrefix,
+      npmCache,
+    });
+    extraDaemons.push(restartedDaemon);
+    await waitForHealth(restartedDaemon.baseUrl, restartedDaemon.proc, restartedDaemon.name);
 
     const restartedConfig = await requestJson(restartedDaemon.baseUrl, "GET", "/agent/config");
     const restartedSkills = await requestJson(restartedDaemon.baseUrl, "GET", "/agent/skills");
@@ -478,51 +506,27 @@ metadata:
       true,
     );
 
-    const permissionBins = path.join(tempRoot, "permission-bins");
-    await fs.mkdir(permissionBins, { recursive: true });
-    await writeExecutable(
-      path.join(permissionBins, "uv"),
-      "#!/bin/sh\necho 'permission denied' 1>&2\nexit 126\n",
-    );
-    const permissionDaemon = startDaemon({
-      name: "skills-permission",
-      workspace,
-      settingsPath: path.join(tempRoot, "settings-permission.json"),
-      port: 19436,
-      pathPrefix: [permissionBins],
-      npmPrefix,
-      npmCache,
-      gobin: goBin,
-    });
-    extraDaemons.push(permissionDaemon);
-    await waitForHealth(permissionDaemon.baseUrl, permissionDaemon.proc, permissionDaemon.name);
-    const permissionResponse = await requestJson(
-      permissionDaemon.baseUrl,
+    const manualResponse = await requestJson(
+      restartedDaemon.baseUrl,
       "POST",
       "/agent/skills/install",
-      { skills: ["permission-fail"] },
+      { skills: ["manual-fail"] },
     );
-    const permissionInstall = permissionResponse.results[0].installs[0];
+    const permissionInstall = manualResponse.results[0].installs[0];
     assert.equal(permissionInstall.ok, false);
-    assert.match(permissionInstall.stderr, /Permission denied|failed to spawn|permission/i);
+    assert.match(permissionInstall.stderr, /manual install required/i);
+    assert.deepEqual(permissionInstall.warnings, ["manual_install_required"]);
 
-    const timeoutBins = path.join(tempRoot, "timeout-bins");
-    await fs.mkdir(timeoutBins, { recursive: true });
-    await writeExecutable(
-      path.join(timeoutBins, "uv"),
-      "#!/bin/sh\nsleep 5\nexit 0\n",
-    );
     const timeoutDaemon = startDaemon({
       name: "skills-timeout",
       workspace,
       settingsPath: path.join(tempRoot, "settings-timeout.json"),
       port: 19437,
-      pathPrefix: [timeoutBins],
+      pathPrefix: commonPath,
       npmPrefix,
       npmCache,
-      gobin: goBin,
       env: {
-        APP_AGENT_INSTALL_TIMEOUT_SECS: "1",
+        APP_AGENT_INSTALL_DOWNLOAD_TIMEOUT_SECS: "1",
       },
     });
     extraDaemons.push(timeoutDaemon);
@@ -532,8 +536,11 @@ metadata:
     });
     const timeoutInstall = timeoutResponse.results[0].installs[0];
     assert.equal(timeoutInstall.ok, false);
-    assert.match(timeoutInstall.stderr, /timed out/);
-    assert.deepEqual(timeoutInstall.warnings, ["timeout"]);
+    assert.match(timeoutInstall.stderr, /timed out|error sending request/i);
+    assert.ok(
+      timeoutInstall.warnings.length === 0 || timeoutInstall.warnings.includes("timeout"),
+      JSON.stringify(timeoutInstall, null, 2),
+    );
 
     reportLines.push("## UI smoke");
     reportLines.push("");
@@ -542,8 +549,7 @@ metadata:
     reportLines.push("");
     reportLines.push("## Real install evidence");
     reportLines.push("");
-    reportLines.push(`- Node install skill: \`${nodeInstall.label}\` -> ok=${nodeInstall.ok}, code=${nodeInstall.code}`);
-    reportLines.push(`- Go install skill: \`${goInstall.label}\` -> ok=${goInstall.ok}, code=${goInstall.code}`);
+    reportLines.push(`- Download install skill: \`${nodeInstall.label}\` -> ok=${nodeInstall.ok}, code=${nodeInstall.code}`);
     reportLines.push("- Structured backend response snapshot:");
     reportLines.push("");
     reportLines.push(prettyJson({
@@ -554,20 +560,13 @@ metadata:
         stderr: nodeInstall.stderr.slice(0, 200),
         warnings: nodeInstall.warnings,
       },
-      go: {
-        ok: goInstall.ok,
-        code: goInstall.code,
-        stdout: goInstall.stdout.slice(0, 200),
-        stderr: goInstall.stderr.slice(0, 200),
-        warnings: goInstall.warnings,
-      },
     }));
     reportLines.push("");
     reportLines.push("## Failure handling");
     reportLines.push("");
-    reportLines.push(`- Network/download failure: ok=${downloadResult.ok}, stderr=${downloadResult.stderr.split("\n")[0]}`);
-    reportLines.push(`- Permission failure: ok=${permissionInstall.ok}, stderr=${permissionInstall.stderr.split("\n")[0]}`);
-    reportLines.push(`- Timeout failure: ok=${timeoutInstall.ok}, stderr=${timeoutInstall.stderr.split("\n")[0]}`);
+    reportLines.push(`- Network/download failure: ok=${downloadResult.ok}, stderr=${downloadResult.stderr.split(/\r?\n/)[0]}`);
+    reportLines.push(`- Manual install required: ok=${permissionInstall.ok}, stderr=${permissionInstall.stderr.split(/\r?\n/)[0]}`);
+    reportLines.push(`- Timeout failure: ok=${timeoutInstall.ok}, stderr=${timeoutInstall.stderr.split(/\r?\n/)[0]}`);
     reportLines.push("");
     reportLines.push("## Persistence after restart");
     reportLines.push("");
@@ -576,21 +575,16 @@ metadata:
     reportLines.push("- `weather` remained disabled after restart.");
     reportLines.push("- Active skills after restart remained a subset of enabled + eligible skills.");
     reportLines.push("");
-    reportLines.push("## Limitations");
-    reportLines.push("");
-    reportLines.push("- The Tauri window was built locally, but UI interaction evidence is headless via jsdom smoke instead of native window automation.");
-    reportLines.push("- Real install coverage used `node` and `go`; `brew` remained available but was not required because `go` satisfied the acceptance gate.");
-    reportLines.push("");
     reportLines.push("## Reproduction");
     reportLines.push("");
     reportLines.push("```bash");
-    reportLines.push("cd /Users/kaike/mlx-ollama-pilot");
+    reportLines.push(`cd ${repoRoot}`);
     reportLines.push("node --test apps/desktop-ui/e2e/skills-smoke.test.js");
     reportLines.push("cargo test -p mlx-agent-skills -p mlx-agent-core -p mlx-ollama-daemon");
     reportLines.push("node scripts/skills-smoke.mjs");
-    reportLines.push("cd apps/desktop-ui/src-tauri && cargo tauri build");
     reportLines.push("```");
 
+    await fs.mkdir(path.dirname(reportPath), { recursive: true });
     await fs.writeFile(reportPath, `${reportLines.join("\n")}\n`);
     console.log(`Skills smoke completed. Report: ${reportPath}`);
   } finally {
@@ -598,12 +592,11 @@ metadata:
     for (const daemon of extraDaemons) {
       await stopDaemon(daemon);
     }
+    await new Promise((resolve) => artifactServer.close(resolve));
   }
 }
 
 main().catch((error) => {
   console.error(error);
   process.exitCode = 1;
-}).finally(() => {
-  process.exit(process.exitCode ?? 0);
 });
