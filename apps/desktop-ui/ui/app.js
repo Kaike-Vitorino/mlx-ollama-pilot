@@ -802,7 +802,7 @@
       options: { temperature: 0.2, airllm_enabled: state.airllmEnabled },
     };
 
-    let thinking = '', answer = '', metrics = {};
+    let streamedThinking = '', rawAnswer = '', metrics = {};
 
     try {
       const res = await fetch(state.daemonUrl + '/chat/stream', {
@@ -813,7 +813,7 @@
       });
 
       if (!res.ok) {
-        if (res.status === 404 || res.status === 405) return sendChatNonStreaming(payload);
+        if (res.status === 404 || res.status === 405) return sendChatNonStreaming(payload, assistantEl);
         throw new Error(`HTTP ${res.status}`);
       }
 
@@ -834,17 +834,20 @@
           if (evt.event === 'status') {
             updateStreamStatus(assistantEl, evt.status);
           } else if (evt.event === 'thinking_delta') {
-            thinking += evt.delta || '';
-            updateThinking(assistantEl, thinking);
+            streamedThinking += evt.delta || '';
+            renderAssistantOutput(assistantEl, { rawAnswer, streamedThinking });
           } else if (evt.event === 'answer_delta') {
-            answer += evt.delta || '';
-            updateAnswer(assistantEl, answer);
+            rawAnswer += evt.delta || '';
+            renderAssistantOutput(assistantEl, { rawAnswer, streamedThinking });
           } else if (evt.event === 'metrics') {
             metrics = { ...metrics, ...evt };
           } else if (evt.event === 'done') {
             metrics = { ...metrics, ...evt };
             addMetrics(assistantEl, metrics);
-            state.messages.push({ role: 'assistant', content: answer });
+            const rendered = renderAssistantOutput(assistantEl, { rawAnswer, streamedThinking, finalize: true });
+            if (rendered.answer) {
+              state.messages.push({ role: 'assistant', content: rendered.answer });
+            }
           } else if (evt.event === 'error') {
             throw new Error(evt.message || 'Erro desconhecido');
           }
@@ -859,14 +862,15 @@
     }
   }
 
-  async function sendChatNonStreaming(payload) {
-    const el = addMessage('assistant', '');
+  async function sendChatNonStreaming(payload, el = addMessage('assistant', '')) {
     updateStreamStatus(el, 'thinking');
     try {
       const res = await api('/chat', { method: 'POST', body: JSON.stringify(payload) });
       const content = res?.message?.content || res?.final_response || 'Sem resposta.';
-      updateAnswer(el, content);
-      state.messages.push({ role: 'assistant', content });
+      const rendered = renderAssistantOutput(el, { rawAnswer: content, finalize: true });
+      if (rendered.answer) {
+        state.messages.push({ role: 'assistant', content: rendered.answer });
+      }
       if (res?.usage) addMetrics(el, { prompt_tokens: res.usage.prompt_tokens, completion_tokens: res.usage.completion_tokens, total_tokens: res.usage.total_tokens, latency_ms: res.latency_ms });
     } catch (e) {
       updateAnswer(el, `Erro: ${e.message}`);
@@ -909,25 +913,90 @@
 
   function updateThinking(el, text) {
     if (!el) return;
-    let block = el.querySelector('.msg-thinking');
+    const normalized = String(text || '').trim();
     const body = el.querySelector('.msg-body');
+    if (!body) return;
+    let toggle = el.querySelector('.msg-thinking-toggle');
+    let block = el.querySelector('.msg-thinking');
+    if (!normalized) {
+      toggle?.remove();
+      block?.remove();
+      return;
+    }
     if (!block) {
-      const toggle = document.createElement('div');
+      toggle = document.createElement('button');
+      toggle.type = 'button';
       toggle.className = 'msg-thinking-toggle';
-      toggle.innerHTML = '<span class="thinking-chevron">&#9662;</span> Pensando...';
-      toggle.addEventListener('click', () => { block.style.display = block.style.display === 'none' ? 'block' : 'none'; });
+      toggle.innerHTML = '<span class="thinking-chevron">&#9662;</span><span class="thinking-label">Pensando</span>';
       block = document.createElement('div');
       block.className = 'msg-thinking';
       block.innerHTML = `<div class="thinking-content"></div>`;
+      toggle.addEventListener('click', () => {
+        const collapsed = toggle.classList.toggle('collapsed');
+        block.style.display = collapsed ? 'none' : 'block';
+      });
       body.insertBefore(block, body.firstChild);
       body.insertBefore(toggle, block);
     }
-    block.querySelector('.thinking-content').textContent = text;
+    block.querySelector('.thinking-content').textContent = normalized;
   }
 
   function updateAnswer(el, text) {
     const c = el?.querySelector('.msg-content');
     if (c) c.innerHTML = renderMarkdown(text);
+  }
+
+  function joinThinkingSections(...sections) {
+    return sections
+      .map(section => String(section || '').trim())
+      .filter(Boolean)
+      .join('\n\n')
+      .trim();
+  }
+
+  function splitThinkingBlocks(text) {
+    const source = String(text || '').replace(/\r\n?/g, '\n');
+    if (!source) return { thinking: '', answer: '' };
+
+    const thinkingParts = [];
+    const answerParts = [];
+    const regex = /<think>([\s\S]*?)<\/think>/gi;
+    let cursor = 0;
+    let match;
+
+    while ((match = regex.exec(source))) {
+      answerParts.push(source.slice(cursor, match.index));
+      thinkingParts.push(match[1]);
+      cursor = regex.lastIndex;
+    }
+
+    const tail = source.slice(cursor);
+    const lowerTail = tail.toLowerCase();
+    const openIndex = lowerTail.indexOf('<think>');
+    if (openIndex >= 0) {
+      answerParts.push(tail.slice(0, openIndex));
+      thinkingParts.push(tail.slice(openIndex + '<think>'.length));
+    } else {
+      answerParts.push(tail);
+    }
+
+    const answer = answerParts.join('').replace(/<\/?think>/gi, '').trim();
+    const thinking = thinkingParts.join('\n\n').replace(/<\/?think>/gi, '').trim();
+    return { thinking, answer };
+  }
+
+  function renderAssistantOutput(el, { rawAnswer = '', streamedThinking = '', finalize = false } = {}) {
+    const parsed = splitThinkingBlocks(rawAnswer);
+    const combinedThinking = joinThinkingSections(streamedThinking, parsed.thinking);
+    if (combinedThinking) updateThinking(el, combinedThinking);
+
+    const answerText = parsed.answer;
+    const hasThinkMarkup = /<\/?think>/i.test(rawAnswer);
+    if (answerText || (finalize && rawAnswer && !hasThinkMarkup)) {
+      updateAnswer(el, answerText || rawAnswer);
+    }
+
+    return { thinking: combinedThinking, answer: answerText || (!hasThinkMarkup ? String(rawAnswer || '').trim() : '') };
   }
 
   function createStreamDecoder() {
@@ -937,8 +1006,8 @@
   }
 
   async function sendAgentMessageStreaming(payload, assistantEl) {
-    let thinking = '';
-    let answer = '';
+    let streamedThinking = '';
+    let rawAnswer = '';
     let metrics = {};
 
     const res = await fetch(state.daemonUrl + '/agent/stream', {
@@ -970,22 +1039,22 @@
         if (evt.event === 'status') {
           updateStreamStatus(assistantEl, evt.status);
         } else if (evt.event === 'thinking_delta') {
-          thinking += evt.delta || '';
-          updateThinking(assistantEl, thinking);
+          streamedThinking += evt.delta || '';
+          renderAssistantOutput(assistantEl, { rawAnswer, streamedThinking });
         } else if (evt.event === 'answer_delta') {
-          answer += evt.delta || '';
-          updateAnswer(assistantEl, answer);
+          rawAnswer += evt.delta || '';
+          renderAssistantOutput(assistantEl, { rawAnswer, streamedThinking });
         } else if (evt.event === 'tool_call_started') {
-          thinking += `\nExecutando tool '${evt.tool || '?'}'...`;
-          updateThinking(assistantEl, thinking.trim());
+          streamedThinking = joinThinkingSections(streamedThinking, `Executando tool '${evt.tool || '?'}'...`);
+          renderAssistantOutput(assistantEl, { rawAnswer, streamedThinking });
         } else if (evt.event === 'tool_call_completed') {
           const preview = evt.message ? `: ${evt.message}` : '';
-          thinking += `\nTool '${evt.tool || '?'}' concluida${preview}`;
-          updateThinking(assistantEl, thinking.trim());
+          streamedThinking = joinThinkingSections(streamedThinking, `Tool '${evt.tool || '?'}' concluida${preview}`);
+          renderAssistantOutput(assistantEl, { rawAnswer, streamedThinking });
         } else if (evt.event === 'tool_call_denied') {
           const preview = evt.message ? `: ${evt.message}` : '';
-          thinking += `\nTool '${evt.tool || '?'}' negada${preview}`;
-          updateThinking(assistantEl, thinking.trim());
+          streamedThinking = joinThinkingSections(streamedThinking, `Tool '${evt.tool || '?'}' negada${preview}`);
+          renderAssistantOutput(assistantEl, { rawAnswer, streamedThinking });
         } else if (evt.event === 'done') {
           metrics = { ...metrics, ...evt };
         } else if (evt.event === 'error') {
@@ -994,11 +1063,12 @@
       }
     }
 
-    if (answer) {
-      state.messages.push({ role: 'assistant', content: answer });
+    const rendered = renderAssistantOutput(assistantEl, { rawAnswer, streamedThinking, finalize: true });
+    if (rendered.answer) {
+      state.messages.push({ role: 'assistant', content: rendered.answer });
     }
     if (metrics?.total_tokens) addMetrics(assistantEl, metrics);
-    return { answer, metrics, session_id: metrics?.session_id || payload.session_id || null };
+    return { answer: rendered.answer, metrics, session_id: metrics?.session_id || payload.session_id || null };
   }
 
   function addMetrics(el, m) {
@@ -1650,7 +1720,7 @@
       }
       if (res) {
         const content = res?.final_response || 'Sem resposta.';
-        agDiv.querySelector('.msg-content').innerHTML = renderMarkdown(content);
+        renderAssistantOutput(agDiv, { rawAnswer: content, finalize: true });
         if (res?.total_tokens) addMetrics(agDiv, res);
       }
     } catch (e) {
@@ -1923,17 +1993,165 @@
   function fmtDuration(s) { if (s < 60) return s + 's'; if (s < 3600) return `${Math.floor(s / 60)}m ${s % 60}s`; return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`; }
   function modelIcon(id) { const l = (id || '').toLowerCase(); if (l.includes('llama')) return 'llama'; if (l.includes('mistral')) return 'mistral'; if (l.includes('qwen')) return 'qwen'; if (l.includes('deepseek')) return 'deepseek'; if (l.includes('phi')) return 'phi'; return 'llama'; }
 
-  function renderMarkdown(text) {
+  function stashHtmlToken(tokens, html) {
+    const token = `\uE000${tokens.length}\uE001`;
+    tokens.push(html);
+    return token;
+  }
+
+  function restoreHtmlTokens(text, tokens) {
+    return String(text || '').replace(/\uE000(\d+)\uE001/g, (_, index) => tokens[Number(index)] || '');
+  }
+
+  function sanitizeHref(href) {
+    const value = String(href || '').trim();
+    if (/^(https?:|mailto:)/i.test(value)) return esc(value);
+    return '#';
+  }
+
+  function renderInlineMarkdown(text) {
     if (!text) return '';
-    let h = esc(text);
-    h = h.replace(/```(\w*)\n([\s\S]*?)```/g, (_, l, c) => `<div class="code-block"><div class="code-header"><span class="code-lang">${esc(l || 'code')}</span><button class="code-copy">Copiar</button></div><pre><code>${c.trim()}</code></pre></div>`);
-    h = h.replace(/`([^`]+)`/g, '<code>$1</code>');
-    h = h.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
-    h = h.replace(/\n\n/g, '</p><p>');
-    h = h.replace(/\n/g, '<br>');
-    h = '<p>' + h + '</p>';
-    h = h.replace(/(https?:\/\/[^\s<]+)/g, '<a href="$1" target="_blank" rel="noopener">$1</a>');
-    return h;
+    const tokens = [];
+    let output = String(text);
+
+    output = output.replace(/`([^`\n]+)`/g, (_, code) => stashHtmlToken(tokens, `<code>${esc(code)}</code>`));
+    output = output.replace(/\[([^\]]+)\]\(([^)\s]+)(?:\s+"([^"]*)")?\)/g, (_, label, href, title) => {
+      const titleAttr = title ? ` title="${esc(title)}"` : '';
+      return stashHtmlToken(tokens, `<a href="${sanitizeHref(href)}" target="_blank" rel="noopener"${titleAttr}>${renderInlineMarkdown(label)}</a>`);
+    });
+
+    output = esc(output);
+    output = output.replace(/(^|[\s(])\*\*([^*]+)\*\*(?=$|[\s).,!?:;])/g, '$1<strong>$2</strong>');
+    output = output.replace(/(^|[\s(])__([^_]+)__(?=$|[\s).,!?:;])/g, '$1<strong>$2</strong>');
+    output = output.replace(/(^|[\s(])\*([^*]+)\*(?=$|[\s).,!?:;])/g, '$1<em>$2</em>');
+    output = output.replace(/(^|[\s(])_([^_]+)_(?=$|[\s).,!?:;])/g, '$1<em>$2</em>');
+    output = output.replace(/~~([^~]+)~~/g, '<del>$1</del>');
+    output = output.replace(/(https?:\/\/[^\s<]+)/g, '<a href="$1" target="_blank" rel="noopener">$1</a>');
+    return restoreHtmlTokens(output, tokens);
+  }
+
+  function splitTableRow(line) {
+    return String(line || '')
+      .trim()
+      .replace(/^\|/, '')
+      .replace(/\|$/, '')
+      .split('|')
+      .map(cell => cell.trim());
+  }
+
+  function isTableSeparator(line) {
+    return /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(line || '');
+  }
+
+  function isMarkdownBlockBoundary(line, nextLine) {
+    const trimmed = String(line || '').trim();
+    if (!trimmed) return true;
+    if (/^\uE000\d+\uE001$/.test(trimmed)) return true;
+    if (/^#{1,6}\s+/.test(trimmed)) return true;
+    if (/^>\s?/.test(trimmed)) return true;
+    if (/^([-+*]|\d+\.)\s+/.test(trimmed)) return true;
+    if (/^(-{3,}|\*{3,}|_{3,})$/.test(trimmed)) return true;
+    if (trimmed.includes('|') && isTableSeparator(nextLine || '')) return true;
+    return false;
+  }
+
+  function renderMarkdown(text) {
+    const source = String(text || '').replace(/\r\n?/g, '\n').trim();
+    if (!source) return '';
+
+    const blockTokens = [];
+    const normalized = source.replace(/```([\w.+-]*)\n?([\s\S]*?)```/g, (_, lang, code) => {
+      const language = (lang || 'code').trim();
+      const body = esc((code || '').replace(/\n$/, ''));
+      return stashHtmlToken(blockTokens, `<div class="code-block"><div class="code-header"><span class="code-lang">${esc(language)}</span><button class="code-copy">Copiar</button></div><pre><code>${body}</code></pre></div>`);
+    });
+
+    const lines = normalized.split('\n');
+    const blocks = [];
+
+    for (let index = 0; index < lines.length;) {
+      const line = lines[index];
+      const trimmed = line.trim();
+
+      if (!trimmed) {
+        index += 1;
+        continue;
+      }
+
+      if (/^\uE000\d+\uE001$/.test(trimmed)) {
+        blocks.push(trimmed);
+        index += 1;
+        continue;
+      }
+
+      const heading = trimmed.match(/^(#{1,6})\s+(.+)$/);
+      if (heading) {
+        const level = heading[1].length;
+        blocks.push(`<h${level}>${renderInlineMarkdown(heading[2].trim())}</h${level}>`);
+        index += 1;
+        continue;
+      }
+
+      if (/^(-{3,}|\*{3,}|_{3,})$/.test(trimmed)) {
+        blocks.push('<hr>');
+        index += 1;
+        continue;
+      }
+
+      if (/^>\s?/.test(trimmed)) {
+        const quoteLines = [];
+        while (index < lines.length && /^>\s?/.test(lines[index].trim())) {
+          quoteLines.push(lines[index].trim().replace(/^>\s?/, ''));
+          index += 1;
+        }
+        blocks.push(`<blockquote>${renderMarkdown(quoteLines.join('\n'))}</blockquote>`);
+        continue;
+      }
+
+      const listItem = trimmed.match(/^([-+*]|\d+\.)\s+(.+)$/);
+      if (listItem) {
+        const ordered = /\d+\./.test(listItem[1]);
+        const tag = ordered ? 'ol' : 'ul';
+        const items = [];
+        while (index < lines.length) {
+          const current = lines[index].trim().match(/^([-+*]|\d+\.)\s+(.+)$/);
+          if (!current) break;
+          items.push(`<li>${renderInlineMarkdown(current[2])}</li>`);
+          index += 1;
+        }
+        blocks.push(`<${tag}>${items.join('')}</${tag}>`);
+        continue;
+      }
+
+      if (trimmed.includes('|') && isTableSeparator(lines[index + 1] || '')) {
+        const header = splitTableRow(lines[index]);
+        index += 2;
+        const rows = [];
+        while (index < lines.length && lines[index].includes('|') && lines[index].trim()) {
+          rows.push(splitTableRow(lines[index]));
+          index += 1;
+        }
+        const headHtml = `<thead><tr>${header.map(cell => `<th>${renderInlineMarkdown(cell)}</th>`).join('')}</tr></thead>`;
+        const bodyHtml = rows.length
+          ? `<tbody>${rows.map(row => `<tr>${row.map(cell => `<td>${renderInlineMarkdown(cell)}</td>`).join('')}</tr>`).join('')}</tbody>`
+          : '';
+        blocks.push(`<div class="markdown-table-wrap"><table>${headHtml}${bodyHtml}</table></div>`);
+        continue;
+      }
+
+      const paragraph = [];
+      while (index < lines.length) {
+        const current = lines[index];
+        const next = lines[index + 1];
+        if (!current.trim()) break;
+        if (paragraph.length > 0 && isMarkdownBlockBoundary(current, next)) break;
+        paragraph.push(current.trim());
+        index += 1;
+      }
+      blocks.push(`<p>${renderInlineMarkdown(paragraph.join('\n')).replace(/\n/g, '<br>')}</p>`);
+    }
+
+    return restoreHtmlTokens(blocks.join(''), blockTokens);
   }
 
 })();

@@ -248,13 +248,36 @@ function createFixture({
       return jsonResponse({ variables: [] });
     }
 
+    if (path === "/chat/stream" && method === "POST") {
+      return streamingResponse([
+        JSON.stringify({ event: "status", status: "thinking" }),
+        JSON.stringify({ event: "thinking_delta", delta: "Mapeando estado inicial..." }),
+        JSON.stringify({ event: "answer_delta", delta: "<think>Consolidando contexto interno.</think>\n## Diagnostico\n- Runtime conectado\n- Cache aquecido\n\n```js\nconsole.log('ok');\n```" }),
+        JSON.stringify({ event: "done", status: "completed", total_tokens: 64, latency_ms: 320 }),
+      ]);
+    }
+
+    if (path === "/chat" && method === "POST") {
+      return jsonResponse({
+        message: {
+          content: "<think>Consolidando contexto interno.</think>\n## Diagnostico\n- Runtime conectado",
+        },
+        usage: {
+          prompt_tokens: 30,
+          completion_tokens: 10,
+          total_tokens: 40,
+        },
+        latency_ms: 320,
+      });
+    }
+
     if (path === "/agent/stream" && method === "POST") {
       return streamingResponse([
         JSON.stringify({ event: "status", status: "thinking", session_id: body?.session_id || "sess-1" }),
         JSON.stringify({ event: "thinking_delta", delta: "Planejando...", session_id: body?.session_id || "sess-1" }),
         JSON.stringify({ event: "tool_call_started", tool: "read_file", session_id: body?.session_id || "sess-1" }),
         JSON.stringify({ event: "tool_call_completed", tool: "read_file", message: "ok", session_id: body?.session_id || "sess-1" }),
-        JSON.stringify({ event: "answer_delta", delta: "Resposta do agent", session_id: body?.session_id || "sess-1" }),
+        JSON.stringify({ event: "answer_delta", delta: "<think>Validando politica final.</think>\n## Resposta do agent\n- Ajuste aplicado", session_id: body?.session_id || "sess-1" }),
         JSON.stringify({ event: "done", status: "completed", session_id: body?.session_id || "sess-1", total_tokens: 128, latency_ms: 900 }),
       ]);
     }
@@ -262,7 +285,7 @@ function createFixture({
     if (path === "/agent/run" && method === "POST") {
       return jsonResponse({
         session_id: body?.session_id || "sess-1",
-        final_response: "Resposta do agent",
+        final_response: "<think>Validando politica final.</think>\n## Resposta do agent\n- Ajuste aplicado",
         total_tokens: 128,
         latency_ms: 900,
       });
@@ -326,12 +349,43 @@ test("agent workspace prompts, submits runs, and creates sessions", async () => 
     assert.equal(runCall.body.model_id, "mlx-community/Qwen3-4B-4bit");
     assert.match(fixture.document.getElementById("agent-chat-messages")?.textContent || "", /Resposta do agent/);
     assert.match(fixture.document.getElementById("agent-chat-messages")?.textContent || "", /read_file/);
+    assert.match(fixture.document.querySelector("#agent-chat-messages .thinking-content")?.textContent || "", /Validando politica final/);
+    const agentAssistantHtml = fixture.document.querySelector("#agent-chat-messages .assistant-message .msg-content")?.innerHTML || "";
+    assert.match(agentAssistantHtml, /<h2>Resposta do agent<\/h2>/);
+    assert.match(agentAssistantHtml, /<li>Ajuste aplicado<\/li>/);
 
     fixture.document.getElementById("btn-new-session")?.click();
     await flush();
 
     assert.equal(fixture.document.getElementById("agent-session-count")?.textContent, "3");
     assert.equal(fixture.document.getElementById("btn-export-session")?.disabled, false);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("chat stream shows thinking and renders markdown output", async () => {
+  const fixture = createFixture();
+
+  try {
+    await flush();
+
+    const input = fixture.document.getElementById("chat-input");
+    input.value = "Diagnostique o runtime atual";
+    fixture.document.getElementById("send-btn")?.click();
+    await flush(6);
+
+    const streamCall = fixture.fetchCalls.find((entry) => entry.path === "/chat/stream");
+    assert.ok(streamCall);
+
+    const thinkingText = fixture.document.querySelector("#chat-messages .assistant-message .thinking-content")?.textContent || "";
+    const answerHtml = fixture.document.querySelector("#chat-messages .assistant-message .msg-content")?.innerHTML || "";
+
+    assert.match(thinkingText, /Mapeando estado inicial/);
+    assert.match(thinkingText, /Consolidando contexto interno/);
+    assert.match(answerHtml, /<h2>Diagnostico<\/h2>/);
+    assert.match(answerHtml, /<li>Runtime conectado<\/li>/);
+    assert.match(answerHtml, /code-block/);
   } finally {
     fixture.cleanup();
   }
