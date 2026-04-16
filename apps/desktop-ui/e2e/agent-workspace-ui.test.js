@@ -25,7 +25,12 @@ async function flush(count = 4) {
   }
 }
 
-function createFixture() {
+function createFixture({
+  modelsResponse,
+  cachedModels,
+  cachedCurrentModel,
+  openClawAvailable = true,
+} = {}) {
   let sessions = [
     { id: "sess-1", name: "Operacao", message_count: 3 },
     { id: "sess-2", name: "Channels", message_count: 1 },
@@ -41,6 +46,15 @@ function createFixture() {
 
   const { window } = dom;
   const { document } = window;
+
+  window.__MLX_PILOT_DAEMON_URL__ = "http://127.0.0.1:11436";
+  window.localStorage.setItem("mlxPilotDaemonUrl", "http://127.0.0.1:11435");
+  if (cachedModels) {
+    window.localStorage.setItem("mlxPilotModelCache", JSON.stringify(cachedModels));
+  }
+  if (cachedCurrentModel) {
+    window.localStorage.setItem("mlxPilotCurrentModel", cachedCurrentModel);
+  }
 
   Object.defineProperty(window.HTMLCanvasElement.prototype, "getContext", {
     configurable: true,
@@ -82,7 +96,7 @@ function createFixture() {
     const method = options.method || "GET";
     const body = options.body ? JSON.parse(options.body) : null;
 
-    fetchCalls.push({ method, path, body });
+    fetchCalls.push({ method, path, body, url: requestUrl.toString() });
 
     if (path === "/health") {
       return jsonResponse({ status: "ok", provider: "ollama" });
@@ -98,7 +112,7 @@ function createFixture() {
     }
 
     if (path === "/models") {
-      return jsonResponse([
+      return jsonResponse(modelsResponse ?? [
         {
           id: "mlx-community/Qwen3-4B-4bit",
           name: "Qwen3 4B",
@@ -106,6 +120,13 @@ function createFixture() {
           is_available: true,
         },
       ]);
+    }
+
+    if (path === "/openclaw/status") {
+      return jsonResponse({
+        available: openClawAvailable,
+        cli_exists: openClawAvailable,
+      });
     }
 
     if (path === "/agent/config" && method === "GET") {
@@ -227,6 +248,7 @@ test("agent workspace boots with live summary and toggles config tab", async () 
   try {
     await flush();
 
+    assert.ok(fixture.fetchCalls.some((entry) => entry.url.startsWith("http://127.0.0.1:11436/")));
     assert.equal(fixture.document.getElementById("agent-daemon-status")?.textContent, "Online");
     assert.equal(fixture.document.getElementById("agent-session-count")?.textContent, "2");
     assert.equal(fixture.document.getElementById("agent-plugin-count")?.textContent, "1");
@@ -268,6 +290,32 @@ test("agent workspace prompts, submits runs, and creates sessions", async () => 
 
     assert.equal(fixture.document.getElementById("agent-session-count")?.textContent, "3");
     assert.equal(fixture.document.getElementById("btn-export-session")?.disabled, false);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("workspace hides OpenClaw when unavailable and preserves cached model shell", async () => {
+  const fixture = createFixture({
+    modelsResponse: [],
+    cachedModels: [
+      {
+        id: "cached/qwen-local",
+        name: "Qwen Local",
+        provider: "mlx",
+        is_available: true,
+      },
+    ],
+    cachedCurrentModel: "cached/qwen-local",
+    openClawAvailable: false,
+  });
+
+  try {
+    await flush();
+
+    assert.ok(fixture.document.getElementById("tab-openclaw")?.classList.contains("hidden"));
+    assert.equal(fixture.document.getElementById("current-model")?.textContent, "Qwen Local");
+    assert.match(fixture.document.getElementById("installed-count")?.textContent || "", /modelo/);
   } finally {
     fixture.cleanup();
   }

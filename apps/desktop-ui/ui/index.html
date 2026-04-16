@@ -69,8 +69,8 @@
 
       <div class="sidebar-section sidebar-bottom">
         <div class="connection-status">
-          <span class="status-dot online"></span>
-          <span class="status-text" id="sidebar-daemon-url">Daemon 127.0.0.1:11435</span>
+          <span class="status-dot offline"></span>
+          <span class="status-text" id="sidebar-daemon-url">Conectando ao daemon...</span>
         </div>
       </div>
     </aside>
@@ -97,7 +97,7 @@
             </span>
             Modelos
           </button>
-          <button class="tab" data-panel="openclaw" role="tab">
+          <button class="tab hidden" id="tab-openclaw" data-panel="openclaw" role="tab">
             <span class="tab-icon">
               <svg viewBox="0 0 20 20" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5">
                 <path d="M10 2v4m0 8v4M2 10h4m8 0h4M4.93 4.93l2.83 2.83m6.48 6.48l2.83 2.83M4.93 15.07l2.83-2.83m6.48-6.48l2.83-2.83" />
@@ -135,16 +135,16 @@
           <div class="model-picker" id="model-picker">
             <button class="model-trigger" id="model-trigger">
               <span class="model-dot"></span>
-              <span class="model-name" id="current-model">llama-3.3-70b</span>
+              <span class="model-name" id="current-model">Selecione um modelo</span>
               <span class="model-caret">&#x25BE;</span>
             </button>
             <div class="model-menu hidden" id="model-menu">
-              <div class="model-menu-item" style="pointer-events:none;color:var(--text-tertiary)">Carregando modelos...</div>
+              <div class="model-menu-item" style="pointer-events:none;color:var(--text-tertiary)">Conectando ao daemon...</div>
             </div>
           </div>
           <div class="status-badge" id="status-badge">
-            <span class="badge-dot online"></span>
-            <span>Online</span>
+            <span class="badge-dot offline"></span>
+            <span>Offline</span>
           </div>
         </div>
       </header>

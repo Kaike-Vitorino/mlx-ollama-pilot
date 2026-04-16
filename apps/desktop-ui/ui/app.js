@@ -6,15 +6,44 @@
 (function () {
   'use strict';
 
+  const DEFAULT_DAEMON_URL = 'http://127.0.0.1:11435';
+  const DAEMON_READY_EVENT = 'mlx-pilot-daemon-ready';
+  const API_DEFAULT_TIMEOUT_MS = 8000;
+  const API_SLOW_TIMEOUT_MS = 20000;
+  const MIN_SPLASH_MS = 480;
+  const MODEL_CACHE_KEY = 'mlxPilotModelCache';
+  const CURRENT_MODEL_KEY = 'mlxPilotCurrentModel';
+
+  function readStorage(key) {
+    try {
+      return localStorage.getItem(key);
+    } catch {
+      return null;
+    }
+  }
+
+  function readJsonStorage(key, fallback) {
+    const raw = readStorage(key);
+    if (!raw) return fallback;
+    try {
+      return JSON.parse(raw);
+    } catch {
+      return fallback;
+    }
+  }
+
+  const cachedModels = readJsonStorage(MODEL_CACHE_KEY, []);
+  const cachedCurrentModel = readStorage(CURRENT_MODEL_KEY);
+
   // -- State --------------------------------------------------
   const state = {
-    daemonUrl: localStorage.getItem('mlxPilotDaemonUrl') || 'http://127.0.0.1:11435',
-    models: [],
-    modelsLoaded: false,
+    daemonUrl: window.__MLX_PILOT_DAEMON_URL__ || readStorage('mlxPilotDaemonUrl') || DEFAULT_DAEMON_URL,
+    models: Array.isArray(cachedModels) ? cachedModels : [],
+    modelsLoaded: Array.isArray(cachedModels) && cachedModels.length > 0,
     modelsLoading: false,
     modelsStale: true,
     modelsPromise: null,
-    currentModel: null,
+    currentModel: cachedCurrentModel || null,
     messages: [],
     isStreaming: false,
     streamController: null,
@@ -36,15 +65,46 @@
     channels: [],
     environmentVars: [],
     activeDiscoverTab: 'catalog',
+    openclawInstalled: false,
   };
 
   // -- API ----------------------------------------------------
   async function api(path, opts = {}) {
-    const url = state.daemonUrl + path;
-    const res = await fetch(url, {
-      ...opts,
-      headers: { 'Content-Type': 'application/json', ...opts.headers },
-    });
+    const url = (state.daemonUrl || DEFAULT_DAEMON_URL) + path;
+    const inferredTimeoutMs =
+      path.startsWith('/chat')
+      || path.startsWith('/agent/run')
+      || path.startsWith('/catalog/downloads')
+        ? 120000
+        : path.startsWith('/openclaw')
+        ? API_SLOW_TIMEOUT_MS
+        : API_DEFAULT_TIMEOUT_MS;
+    const { timeoutMs = inferredTimeoutMs, headers: requestHeaders = {}, ...fetchOpts } = opts;
+    const headers = { ...requestHeaders };
+
+    if (fetchOpts.body != null && !Object.keys(headers).some(key => key.toLowerCase() === 'content-type')) {
+      headers['Content-Type'] = 'application/json';
+    }
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+    let res;
+    try {
+      res = await fetch(url, {
+        ...fetchOpts,
+        headers,
+        signal: controller.signal,
+      });
+    } catch (error) {
+      if (error?.name === 'AbortError') {
+        throw new Error(`Tempo limite ao acessar ${path}`);
+      }
+      throw error;
+    } finally {
+      clearTimeout(timeoutId);
+    }
+
     if (res.status === 204 || res.status === 205) return null;
     if (!res.ok) {
       let msg = `HTTP ${res.status}`;
@@ -62,34 +122,199 @@
   // -- Splash -------------------------------------------------
   const splash = document.getElementById('splash');
   const appEl = document.getElementById('app');
+  const splashStartedAt = performance.now();
 
-  setTimeout(() => {
-    splash.classList.add('fade-out');
-    appEl.classList.remove('hidden');
-    setTimeout(() => { splash.style.display = 'none'; }, 800);
-    bootSequence();
-  }, 2200);
+  function revealApp() {
+    const remaining = Math.max(0, MIN_SPLASH_MS - (performance.now() - splashStartedAt));
+    setTimeout(() => {
+      if (!splash || !appEl) return;
+      splash.classList.add('fade-out');
+      appEl.classList.remove('hidden');
+      setTimeout(() => { splash.style.display = 'none'; }, 450);
+    }, remaining);
+  }
 
-  async function bootSequence() {
-    // Update sidebar daemon URL display
+  function updateSidebarDaemonUrl(label) {
     const sidebarUrl = document.getElementById('sidebar-daemon-url');
-    if (sidebarUrl) sidebarUrl.textContent = `Daemon ${state.daemonUrl.replace(/^https?:\/\//, '')}`;
+    if (!sidebarUrl) return;
 
-    try {
-      const health = await api('/health');
-      state.healthOk = health?.status === 'ok';
-      state.provider = health?.provider || 'auto';
-      updateStatusBadge(state.healthOk);
-    } catch {
-      updateStatusBadge(false);
+    if (label) {
+      sidebarUrl.textContent = label;
+      return;
     }
 
-    // Parallel data loads
+    if (!state.daemonUrl) {
+      sidebarUrl.textContent = 'Daemon desconectado';
+      return;
+    }
+
+    sidebarUrl.textContent = `Daemon ${state.daemonUrl.replace(/^https?:\/\//, '')}`;
+  }
+
+  function updateSidebarConnectionStatus(online) {
+    const dot = document.querySelector('.connection-status .status-dot');
+    if (!dot) return;
+    dot.classList.toggle('online', online);
+    dot.classList.toggle('offline', !online);
+  }
+
+  function saveModelCache() {
+    try {
+      localStorage.setItem(MODEL_CACHE_KEY, JSON.stringify(state.models));
+      if (state.currentModel) {
+        localStorage.setItem(CURRENT_MODEL_KEY, state.currentModel);
+      }
+    } catch {
+      /* ignore storage errors */
+    }
+  }
+
+  function ensureVisibleModel(modelId, provider) {
+    const normalizedId = (modelId || '').trim();
+    if (!normalizedId) return;
+
+    if (state.models.some(model => model.id === normalizedId)) return;
+
+    state.models = [
+      ...state.models,
+      {
+        id: normalizedId,
+        name: normalizedId,
+        provider: provider || state.agentConfig?.provider || state.provider || 'configured',
+        path: normalizedId,
+        is_available: false,
+      },
+    ];
+  }
+
+  function hydrateModelShell() {
+    const configuredModel = state.agentConfig?.model_id || state.currentModel;
+    if (configuredModel) {
+      ensureVisibleModel(configuredModel, state.agentConfig?.provider);
+      if (!state.currentModel) state.currentModel = configuredModel;
+    }
+
+    renderModelPicker();
+    if (state.currentModel) {
+      const currentLabel = state.models.find(model => model.id === state.currentModel);
+      const nameEl = document.getElementById('current-model');
+      if (nameEl) nameEl.textContent = currentLabel ? (currentLabel.name || currentLabel.id) : state.currentModel;
+    }
+    renderInstalledModels();
+    updateAgentWorkspaceSummary();
+  }
+
+  function setOpenClawAvailability(installed) {
+    state.openclawInstalled = !!installed;
+
+    const openClawTab = document.getElementById('tab-openclaw');
+    if (openClawTab) {
+      openClawTab.classList.toggle('hidden', !state.openclawInstalled);
+    }
+
+    if (!state.openclawInstalled) {
+      const activeOpenClawTab = document.querySelector('.tab.active[data-panel="openclaw"]');
+      if (activeOpenClawTab) switchTab('chat');
+    }
+  }
+
+  function waitForInjectedDaemonUrl(timeoutMs = 900) {
+    if (window.__MLX_PILOT_DAEMON_URL__) {
+      return Promise.resolve(window.__MLX_PILOT_DAEMON_URL__);
+    }
+
+    return new Promise(resolve => {
+      let settled = false;
+      let timer = null;
+
+      const handler = (event) => {
+        if (settled) return;
+        settled = true;
+        window.removeEventListener(DAEMON_READY_EVENT, handler);
+        if (timer) clearTimeout(timer);
+        resolve(event?.detail?.url || window.__MLX_PILOT_DAEMON_URL__ || null);
+      };
+
+      window.addEventListener(DAEMON_READY_EVENT, handler);
+      timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        window.removeEventListener(DAEMON_READY_EVENT, handler);
+        resolve(window.__MLX_PILOT_DAEMON_URL__ || null);
+      }, timeoutMs);
+    });
+  }
+
+  async function probeDaemon(url, timeoutMs = 1200) {
+    if (!url) return null;
+
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+      const response = await fetch(url + '/health', {
+        method: 'GET',
+        headers: { Accept: 'application/json' },
+        signal: controller.signal,
+      });
+      clearTimeout(timeoutId);
+
+      if (!response.ok) return null;
+      const text = await response.text();
+      if (!text) return null;
+      return JSON.parse(text);
+    } catch {
+      return null;
+    }
+  }
+
+  function daemonCandidates(...urls) {
+    return [...new Set(urls.filter(Boolean).map(url => url.trim()).filter(Boolean))];
+  }
+
+  async function resolveDaemonConnection() {
+    const injectedUrl = await waitForInjectedDaemonUrl();
+    const candidates = daemonCandidates(
+      injectedUrl,
+      window.__MLX_PILOT_DAEMON_URL__,
+      readStorage('mlxPilotDaemonUrl'),
+      state.daemonUrl,
+      DEFAULT_DAEMON_URL
+    );
+
+    for (const candidate of candidates) {
+      const health = await probeDaemon(candidate);
+      if (!health) continue;
+
+      state.daemonUrl = candidate;
+      state.healthOk = health?.status === 'ok';
+      state.provider = health?.provider || 'auto';
+      localStorage.setItem('mlxPilotDaemonUrl', candidate);
+      updateSidebarDaemonUrl();
+      updateStatusBadge(state.healthOk);
+      return health;
+    }
+
+    state.daemonUrl = candidates[0] || DEFAULT_DAEMON_URL;
+    state.healthOk = false;
+    state.provider = '';
+    updateSidebarDaemonUrl(`Daemon ${state.daemonUrl.replace(/^https?:\/\//, '')} indisponivel`);
+    updateStatusBadge(false);
+    return null;
+  }
+
+  async function bootSequence() {
+    const health = await resolveDaemonConnection();
+    if (!health) return;
+
     await Promise.allSettled([
       loadDaemonConfig(),
-      loadModels({ force: true }),
       loadAgentConfig(),
       loadSessions(),
+    ]);
+
+    void Promise.allSettled([
+      loadOpenClawAvailability(),
+      loadModels({ force: true }),
       loadPlugins(),
       loadSkills(),
       loadTools(),
@@ -98,6 +323,14 @@
       loadEnvironment(),
     ]);
   }
+
+  async function startApp() {
+    hydrateModelShell();
+    await bootSequence();
+    revealApp();
+  }
+
+  void startApp();
 
   function updateStatusBadge(online) {
     const badge = document.getElementById('status-badge');
@@ -116,8 +349,10 @@
       runtimeBadge.classList.toggle('status-offline', !online);
     }
 
+    updateSidebarConnectionStatus(online);
     updateAgentWorkspaceSummary();
   }
+
 
   function setText(id, value) {
     const el = document.getElementById(id);
@@ -218,6 +453,15 @@
     }
   }
 
+  async function loadOpenClawAvailability() {
+    try {
+      const status = await api('/openclaw/status', { timeoutMs: 3000 });
+      setOpenClawAvailability(status?.available || status?.cli_exists);
+    } catch {
+      setOpenClawAvailability(false);
+    }
+  }
+
   function populateSettings(c) {
     if (!c) return;
     const set = (id, val) => { const el = document.getElementById(id); if (el && val != null) el.value = val; };
@@ -289,7 +533,12 @@
     try {
       const config = await api('/agent/config');
       state.agentConfig = config;
+      if (config?.model_id) {
+        ensureVisibleModel(config.model_id, config.provider);
+        if (!state.currentModel) state.currentModel = config.model_id;
+      }
       populateAgentPolicy(config);
+      hydrateModelShell();
       updateAgentWorkspaceSummary();
     } catch (e) {
       console.error('Agent config load failed:', e);
@@ -345,8 +594,11 @@
       try {
         const models = await api('/models');
         state.models = Array.isArray(models) ? models : [];
+        if (state.agentConfig?.model_id) ensureVisibleModel(state.agentConfig.model_id, state.agentConfig.provider);
+        if (state.currentModel) ensureVisibleModel(state.currentModel, state.agentConfig?.provider);
         state.modelsLoaded = true;
         state.modelsStale = false;
+        saveModelCache();
         renderModelPicker();
         renderInstalledModels();
         return state.models;
@@ -407,6 +659,11 @@
 
   function selectModel(id) {
     state.currentModel = id;
+    try {
+      localStorage.setItem(CURRENT_MODEL_KEY, id);
+    } catch {
+      /* ignore storage errors */
+    }
     const nameEl = document.getElementById('current-model');
     const model = state.models.find(m => m.id === id);
     if (nameEl) nameEl.textContent = model ? (model.name || model.id) : id;
@@ -765,10 +1022,14 @@
     return fw === 'nanobot' ? `/nanobot${path}` : `/openclaw${path}`;
   }
 
+  function applyOpenClawFramework(value) {
+    state.openclawFramework = value === 'nanobot' ? 'nanobot' : 'openclaw';
+  }
+
   async function loadRuntimeStatus() {
+    const card = document.getElementById('runtime-status-card');
     try {
       const runtime = await api(agentEndpoint('/runtime'));
-      const card = document.getElementById('runtime-status-card');
       if (!card || !runtime) return;
       const isRunning = runtime.service_state === 'running' || runtime.running === true;
       card.querySelector('.runtime-badge').className = `runtime-badge ${isRunning ? 'running' : ''}`;
@@ -780,7 +1041,18 @@
         if (runtime.uptime_seconds) parts.push(`Uptime: ${fmtDuration(runtime.uptime_seconds)}`);
         meta.innerHTML = parts.map(p => `<span>${p}</span>`).join('');
       }
-    } catch (e) { console.error('Runtime load failed:', e); }
+    } catch (e) {
+      if (card) {
+        const badge = card.querySelector('.runtime-badge');
+        if (badge) {
+          badge.className = 'runtime-badge';
+          badge.innerHTML = '<span class="badge-dot"></span> Indisponivel';
+        }
+        const meta = card.querySelector('.runtime-meta');
+        if (meta) meta.innerHTML = `<span>${esc(e.message)}</span>`;
+      }
+      console.error('Runtime load failed:', e);
+    }
   }
 
   async function loadOpenClawObservability() {
@@ -797,7 +1069,16 @@
       const tl = document.querySelector('.obs-tools-list');
       if (tl && data.tools?.length) tl.innerHTML = data.tools.map(t => `<span class="tool-chip-sm">${esc(t)}</span>`).join('');
       else if (tl) tl.innerHTML = '<span style="color:var(--text-tertiary);font-size:12px">Nenhum tool disponível</span>';
-    } catch { /* ok */ }
+    } catch (e) {
+      const mv = document.querySelector('.obs-model-value');
+      if (mv) mv.textContent = '-';
+      const uv = document.querySelector('.obs-usage-value');
+      if (uv) uv.textContent = 'Indisponivel';
+      const sl = document.querySelector('.obs-skills-list');
+      if (sl) sl.innerHTML = `<span style="color:var(--rose);font-size:12px">${esc(e.message)}</span>`;
+      const tl = document.querySelector('.obs-tools-list');
+      if (tl) tl.innerHTML = '<span style="color:var(--text-tertiary);font-size:12px">Nenhum tool disponivel</span>';
+    }
   }
 
   async function loadOpenClawLogs(stream) {
@@ -1103,6 +1384,10 @@
 
   // -- Tab Navigation -----------------------------------------
   function switchTab(target) {
+    if (target === 'openclaw' && !state.openclawInstalled) {
+      target = 'chat';
+    }
+
     document.querySelectorAll('.tab').forEach(t => { t.classList.remove('active'); t.setAttribute('aria-selected', 'false'); });
     document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
     const tab = document.querySelector(`[data-panel="${target}"]`);
@@ -1185,6 +1470,16 @@
       document.getElementById(`oc-${tab.dataset.oc}`).style.display = 'block';
       if (tab.dataset.oc === 'skills-tools') loadOpenClawObservability();
       if (tab.dataset.oc === 'logs') loadOpenClawLogs('gateway');
+    });
+  });
+
+  document.querySelectorAll('input[name="settings-framework"], #oc-framework-cards input[name="framework"]').forEach(radio => {
+    radio.addEventListener('change', () => {
+      applyOpenClawFramework(radio.value);
+      if (document.getElementById('panel-openclaw')?.classList.contains('active')) {
+        loadRuntimeStatus();
+        loadOpenClawObservability();
+      }
     });
   });
 
