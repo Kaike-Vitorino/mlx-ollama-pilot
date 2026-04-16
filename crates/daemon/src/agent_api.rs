@@ -2270,7 +2270,8 @@ fn resolve_provider(
     headers: &BTreeMap<String, String>,
 ) -> Result<ResolvedProvider, AgentApiError> {
     let provider_id = provider.trim().to_ascii_lowercase();
-    let model = model_id.trim();
+    let normalized_model = normalize_agent_model_id(&provider_id, model_id);
+    let model = normalized_model.trim();
     if model.is_empty() {
         return Err(AgentApiError::bad_request("model_id cannot be empty"));
     }
@@ -2427,6 +2428,39 @@ fn resolve_provider(
         _ => Err(AgentApiError::bad_request(format!(
             "unknown provider '{provider}'"
         ))),
+    }
+}
+
+fn normalize_agent_model_id(provider: &str, model_id: &str) -> String {
+    let trimmed = model_id.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    let stripped_suffix = trimmed
+        .strip_suffix(" [Ollama]")
+        .or_else(|| trimmed.strip_suffix(" [MLX]"))
+        .or_else(|| trimmed.strip_suffix(" [llama.cpp]"))
+        .unwrap_or(trimmed)
+        .trim();
+
+    match provider {
+        "ollama" => stripped_suffix
+            .strip_prefix("ollama::")
+            .unwrap_or(stripped_suffix)
+            .trim()
+            .to_string(),
+        "mlx" => stripped_suffix
+            .strip_prefix("mlx::")
+            .unwrap_or(stripped_suffix)
+            .trim()
+            .to_string(),
+        "llamacpp" | "llama" | "llama.cpp" => stripped_suffix
+            .strip_prefix("llama::")
+            .unwrap_or(stripped_suffix)
+            .trim()
+            .to_string(),
+        _ => stripped_suffix.to_string(),
     }
 }
 
@@ -4286,6 +4320,26 @@ mod tests {
         let bun = build_install_command(&spec, "bun").unwrap().unwrap();
         assert_eq!(bun.0, "bun");
         assert_eq!(bun.1, vec!["add", "-g", "@github/gh"]);
+    }
+
+    #[test]
+    fn normalize_agent_model_id_strips_local_prefixes_and_display_suffixes() {
+        assert_eq!(
+            normalize_agent_model_id("ollama", "ollama::deepseek-r1:8b"),
+            "deepseek-r1:8b"
+        );
+        assert_eq!(
+            normalize_agent_model_id("ollama", "deepseek-r1:8b [Ollama]"),
+            "deepseek-r1:8b"
+        );
+        assert_eq!(
+            normalize_agent_model_id("mlx", "mlx::mlx-community/Qwen3-4B-4bit"),
+            "mlx-community/Qwen3-4B-4bit"
+        );
+        assert_eq!(
+            normalize_agent_model_id("llamacpp", "llama::qwen3.gguf [llama.cpp]"),
+            "qwen3.gguf"
+        );
     }
 
     #[test]
