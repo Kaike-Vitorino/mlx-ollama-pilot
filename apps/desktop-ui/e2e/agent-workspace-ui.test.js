@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { TextDecoder, TextEncoder } from "node:util";
 import { JSDOM } from "jsdom";
 
 const indexHtml = await readFile(new URL("../ui/index.html", import.meta.url), "utf8");
@@ -15,6 +16,32 @@ function jsonResponse(data, status = 200) {
     },
     async json() {
       return data;
+    },
+  };
+}
+
+function streamingResponse(lines, status = 200) {
+  const encoder = new TextEncoder();
+  const chunks = lines.map((line) => encoder.encode(`${line}\n`));
+  let index = 0;
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    body: {
+      getReader() {
+        return {
+          async read() {
+            if (index >= chunks.length) return { done: true, value: undefined };
+            return { done: false, value: chunks[index++] };
+          },
+        };
+      },
+    },
+    async text() {
+      return lines.join("\n");
+    },
+    async json() {
+      return JSON.parse(lines[lines.length - 1] || "{}");
     },
   };
 }
@@ -46,6 +73,9 @@ function createFixture({
 
   const { window } = dom;
   const { document } = window;
+
+  window.TextEncoder = TextEncoder;
+  window.TextDecoder = TextDecoder;
 
   window.__MLX_PILOT_DAEMON_URL__ = "http://127.0.0.1:11436";
   window.localStorage.setItem("mlxPilotDaemonUrl", "http://127.0.0.1:11435");
@@ -218,6 +248,17 @@ function createFixture({
       return jsonResponse({ variables: [] });
     }
 
+    if (path === "/agent/stream" && method === "POST") {
+      return streamingResponse([
+        JSON.stringify({ event: "status", status: "thinking", session_id: body?.session_id || "sess-1" }),
+        JSON.stringify({ event: "thinking_delta", delta: "Planejando...", session_id: body?.session_id || "sess-1" }),
+        JSON.stringify({ event: "tool_call_started", tool: "read_file", session_id: body?.session_id || "sess-1" }),
+        JSON.stringify({ event: "tool_call_completed", tool: "read_file", message: "ok", session_id: body?.session_id || "sess-1" }),
+        JSON.stringify({ event: "answer_delta", delta: "Resposta do agent", session_id: body?.session_id || "sess-1" }),
+        JSON.stringify({ event: "done", status: "completed", session_id: body?.session_id || "sess-1", total_tokens: 128, latency_ms: 900 }),
+      ]);
+    }
+
     if (path === "/agent/run" && method === "POST") {
       return jsonResponse({
         session_id: body?.session_id || "sess-1",
@@ -280,10 +321,11 @@ test("agent workspace prompts, submits runs, and creates sessions", async () => 
     fixture.document.getElementById("agent-send-btn")?.click();
     await flush();
 
-    const runCall = fixture.fetchCalls.find((entry) => entry.path === "/agent/run");
+    const runCall = fixture.fetchCalls.find((entry) => entry.path === "/agent/stream");
     assert.ok(runCall);
     assert.equal(runCall.body.model_id, "mlx-community/Qwen3-4B-4bit");
     assert.match(fixture.document.getElementById("agent-chat-messages")?.textContent || "", /Resposta do agent/);
+    assert.match(fixture.document.getElementById("agent-chat-messages")?.textContent || "", /read_file/);
 
     fixture.document.getElementById("btn-new-session")?.click();
     await flush();

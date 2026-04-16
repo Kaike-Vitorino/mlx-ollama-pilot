@@ -6,7 +6,7 @@ use crate::audit::AuditLog;
 use crate::context_budget::{
     ContextBudgetInput, ContextBudgetManager, ContextBudgetTelemetry, ContextSummaryArtifact,
 };
-use crate::events::EventBus;
+use crate::events::{AgentEvent, EventBus};
 use crate::policy::PolicyEngine;
 use crate::prompt_builder::{select_model_prompt_profile, ModelPromptProfile, PromptBuilder};
 use crate::registry::ToolRegistry;
@@ -173,6 +173,10 @@ impl AgentLoop {
         } else {
             self.config.session_id.clone()
         };
+        self.event_bus.emit(AgentEvent::RunStarted {
+            session_id: session_id.clone(),
+            model: self.config.model_id.clone(),
+        });
 
         use crate::audit::{AuditEventType, AuditLogEntry};
         self.log_audit(AuditLogEntry {
@@ -237,6 +241,10 @@ impl AgentLoop {
                     iterations,
                     "agent loop exceeded max iterations"
                 );
+                self.event_bus.emit(AgentEvent::RunFailed {
+                    session_id: session_id.clone(),
+                    error: format!("agent exceeded {} iterations", self.config.max_iterations),
+                });
                 return Err(AgentError::MaxIterations {
                     max: self.config.max_iterations,
                 });
@@ -263,6 +271,10 @@ impl AgentLoop {
                 prompt_estimate = prompt.estimated_prompt_tokens,
                 "calling provider"
             );
+            self.event_bus.emit(AgentEvent::ThinkingDelta {
+                session_id: session_id.clone(),
+                delta: format!("Iteracao {iterations}: consultando provider...\n"),
+            });
 
             // Call provider with tools.
             let should_force_reprompt = self.config.enable_tool_call_fallback
@@ -277,7 +289,7 @@ impl AgentLoop {
                     .collect::<Vec<_>>()
             });
 
-            let response = self
+            let response = match self
                 .provider
                 .chat_with_tools_with_runtime(
                     ChatToolsRequest {
@@ -297,7 +309,17 @@ impl AgentLoop {
                     },
                     self.config.provider_runtime.clone(),
                 )
-                .await?;
+                .await
+            {
+                Ok(response) => response,
+                Err(error) => {
+                    self.event_bus.emit(AgentEvent::RunFailed {
+                        session_id: session_id.clone(),
+                        error: error.to_string(),
+                    });
+                    return Err(error.into());
+                }
+            };
 
             // Accumulate usage.
             total_usage.prompt_tokens += response.usage.prompt_tokens;
@@ -331,6 +353,14 @@ impl AgentLoop {
                 self.history
                     .push(ChatMessage::text(MessageRole::User, user_message));
                 self.history.push(assistant_msg.clone());
+                self.event_bus.emit(AgentEvent::TextDelta {
+                    session_id: session_id.clone(),
+                    delta: assistant_msg.content.clone(),
+                });
+                self.event_bus.emit(AgentEvent::RunCompleted {
+                    session_id: session_id.clone(),
+                    latency_ms: elapsed_ms_u64(started),
+                });
 
                 self.log_audit(AuditLogEntry {
                     id: uuid::Uuid::new_v4().to_string(),
@@ -379,12 +409,34 @@ impl AgentLoop {
                     call_id = %tool_call.id,
                     "executing tool call"
                 );
+                self.event_bus.emit(AgentEvent::ToolCallStarted {
+                    session_id: session_id.clone(),
+                    tool: tool_call.name.clone(),
+                    params: serde_json::from_str(&tool_call.arguments).unwrap_or_default(),
+                });
+                self.event_bus.emit(AgentEvent::ThinkingDelta {
+                    session_id: session_id.clone(),
+                    delta: format!("Executando tool '{}'\n", tool_call.name),
+                });
 
                 let result = self.execute_tool_call(tool_call, &session_id).await;
 
                 let tool_output = match result {
-                    Ok(output) => output,
-                    Err(e) => format!("Error: {e}"),
+                    Ok(output) => {
+                        self.event_bus.emit(AgentEvent::ToolCallCompleted {
+                            session_id: session_id.clone(),
+                            tool: tool_call.name.clone(),
+                            result_preview: output.chars().take(240).collect(),
+                        });
+                        output
+                    }
+                    Err(e) => {
+                        self.event_bus.emit(AgentEvent::ThinkingDelta {
+                            session_id: session_id.clone(),
+                            delta: format!("Tool '{}' retornou erro: {e}\n", tool_call.name),
+                        });
+                        format!("Error: {e}")
+                    }
                 };
 
                 // Inject tool result.

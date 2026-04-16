@@ -1,27 +1,33 @@
 //! `/agent/*` endpoints — full agent runtime API.
 
 use crate::secrets_vault::SecretsVault;
+use axum::body::Body;
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
-use axum::response::IntoResponse;
+use axum::response::{IntoResponse, Response};
 use axum::Json;
+use bytes::Bytes;
 use http_llm_provider::{HttpApiKind, HttpLlmProvider, HttpLlmProviderConfig};
 use mlx_agent_core::approval::{
     ApprovalDecision, ApprovalMode, ApprovalService, DefaultApprovalService,
 };
 use mlx_agent_core::audit::{AuditLog, AuditLogEntry};
-use mlx_agent_core::events::EventBus;
+use mlx_agent_core::events::{AgentEvent, EventBus};
 use mlx_agent_core::policy::{DefaultPolicyEngine, PolicyConfig, PolicyEngine};
 use mlx_agent_core::registry::ToolRegistry;
 use mlx_agent_core::{AgentError, AgentLoop, AgentLoopConfig};
 use mlx_agent_tools::ExecutionMode;
 use mlx_ollama_core::{ChatMessage, FunctionDef, MessageRole, ModelProvider, RuntimeProviderConfig};
 use serde::{Deserialize, Serialize};
+use std::io;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
+use tokio::sync::mpsc;
+use tokio_stream::wrappers::ReceiverStream;
+use tokio_stream::StreamExt;
 use tracing::{info, warn};
 
 // ── Request / Response types ─────────────────────────────────────
@@ -120,6 +126,121 @@ pub struct AgentRunResponse {
     pub latency_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_budget: Option<mlx_agent_core::ContextBudgetTelemetry>,
+}
+
+#[derive(Debug, Serialize)]
+struct AgentStreamFrame {
+    event: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    delta: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    latency_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prompt_tokens: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    completion_tokens: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    total_tokens: Option<usize>,
+}
+
+impl AgentStreamFrame {
+    fn status(value: &str, session_id: Option<String>) -> Self {
+        Self {
+            event: "status".to_string(),
+            status: Some(value.to_string()),
+            delta: None,
+            message: None,
+            session_id,
+            tool: None,
+            latency_ms: None,
+            prompt_tokens: None,
+            completion_tokens: None,
+            total_tokens: None,
+        }
+    }
+
+    fn thinking(delta: String, session_id: String) -> Self {
+        Self {
+            event: "thinking_delta".to_string(),
+            status: None,
+            delta: Some(delta),
+            message: None,
+            session_id: Some(session_id),
+            tool: None,
+            latency_ms: None,
+            prompt_tokens: None,
+            completion_tokens: None,
+            total_tokens: None,
+        }
+    }
+
+    fn answer(delta: String, session_id: String) -> Self {
+        Self {
+            event: "answer_delta".to_string(),
+            status: None,
+            delta: Some(delta),
+            message: None,
+            session_id: Some(session_id),
+            tool: None,
+            latency_ms: None,
+            prompt_tokens: None,
+            completion_tokens: None,
+            total_tokens: None,
+        }
+    }
+
+    fn tool(event: &str, session_id: String, tool: String, message: Option<String>) -> Self {
+        Self {
+            event: event.to_string(),
+            status: None,
+            delta: None,
+            message,
+            session_id: Some(session_id),
+            tool: Some(tool),
+            latency_ms: None,
+            prompt_tokens: None,
+            completion_tokens: None,
+            total_tokens: None,
+        }
+    }
+
+    fn done(response: &AgentRunResponse) -> Self {
+        Self {
+            event: "done".to_string(),
+            status: Some("completed".to_string()),
+            delta: None,
+            message: None,
+            session_id: Some(response.session_id.clone()),
+            tool: None,
+            latency_ms: Some(response.latency_ms),
+            prompt_tokens: Some(response.prompt_tokens),
+            completion_tokens: Some(response.completion_tokens),
+            total_tokens: Some(response.total_tokens),
+        }
+    }
+
+    fn error(message: String, session_id: Option<String>) -> Self {
+        Self {
+            event: "error".to_string(),
+            status: Some("error".to_string()),
+            delta: None,
+            message: Some(message),
+            session_id,
+            tool: None,
+            latency_ms: None,
+            prompt_tokens: None,
+            completion_tokens: None,
+            total_tokens: None,
+        }
+    }
 }
 
 /// Error response from agent endpoints.
@@ -2510,13 +2631,10 @@ async fn run_agent_once(
     })
 }
 
-// ── Handlers ─────────────────────────────────────────────────────
-
-/// POST /agent/run — run the agent loop and return the final response.
-pub async fn agent_run(
-    State(state): State<super::AppState>,
-    Json(request): Json<AgentRunRequest>,
-) -> Result<Json<AgentRunResponse>, AgentApiError> {
+async fn execute_agent_request(
+    state: &super::AppState,
+    request: AgentRunRequest,
+) -> Result<AgentRunResponse, AgentApiError> {
     let message = request.message.trim();
     if message.is_empty() {
         return Err(AgentApiError::bad_request("message cannot be empty"));
@@ -2579,7 +2697,7 @@ pub async fn agent_run(
     }
 
     let registry = AgentProviderRegistry;
-    let primary = registry.resolve(&state, &provider, &model_id, &api_key, &base_url, &headers)?;
+    let primary = registry.resolve(state, &provider, &model_id, &api_key, &base_url, &headers)?;
 
     let fallback_enabled = request
         .fallback_enabled
@@ -2617,15 +2735,14 @@ pub async fn agent_run(
         ));
     }
 
-    let primary_result =
-        run_agent_once(&state, &agent_cfg, &request, primary, workspace.clone()).await;
+    let primary_result = run_agent_once(state, &agent_cfg, &request, primary, workspace.clone()).await;
     match primary_result {
-        Ok(response) => Ok(Json(response)),
+        Ok(response) => Ok(response),
         Err(err) if !fallback_enabled || err.error != "provider_error" => Err(err),
         Err(err) => {
             warn!("primary provider failed, trying fallback: {}", err.error);
             let fallback = registry.resolve(
-                &state,
+                state,
                 &fallback_provider,
                 &fallback_model,
                 &api_key,
@@ -2633,9 +2750,8 @@ pub async fn agent_run(
                 &headers,
             )?;
 
-            let fallback_result =
-                run_agent_once(&state, &agent_cfg, &request, fallback, workspace).await;
-            fallback_result.map(Json).map_err(|fallback_err| {
+            let fallback_result = run_agent_once(state, &agent_cfg, &request, fallback, workspace).await;
+            fallback_result.map_err(|fallback_err| {
                 AgentApiError::new(
                     StatusCode::BAD_GATEWAY,
                     "provider_error",
@@ -2650,18 +2766,108 @@ pub async fn agent_run(
     }
 }
 
-/// POST /agent/stream — streaming agent run (stub).
+// ── Handlers ─────────────────────────────────────────────────────
+
+/// POST /agent/run — run the agent loop and return the final response.
+pub async fn agent_run(
+    State(state): State<super::AppState>,
+    Json(request): Json<AgentRunRequest>,
+) -> Result<Json<AgentRunResponse>, AgentApiError> {
+    execute_agent_request(&state, request).await.map(Json)
+}
+
+/// POST /agent/stream — streaming agent run.
 pub async fn agent_stream(
-    State(_state): State<super::AppState>,
-    Json(_request): Json<AgentRunRequest>,
-) -> impl IntoResponse {
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        Json(serde_json::json!({
-            "error": "not_implemented",
-            "details": "agent streaming will be implemented on top of the EventBus stream"
-        })),
-    )
+    State(state): State<super::AppState>,
+    Json(mut request): Json<AgentRunRequest>,
+) -> Result<Response, AgentApiError> {
+    if request.message.trim().is_empty() {
+        return Err(AgentApiError::bad_request("message cannot be empty"));
+    }
+
+    let session_id = request
+        .session_id
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(mlx_agent_core::SessionStore::new_session_id);
+    request.session_id = Some(session_id.clone());
+
+    let mut subscription = state.agent_state.event_bus.subscribe();
+    let (tx, rx) = mpsc::channel::<AgentStreamFrame>(128);
+    let state_clone = state.clone();
+
+    tokio::spawn(async move {
+        let mut run_task = tokio::spawn(async move { execute_agent_request(&state_clone, request).await });
+
+        loop {
+            tokio::select! {
+                result = &mut run_task => {
+                    match result {
+                        Ok(Ok(response)) => {
+                            let _ = tx.send(AgentStreamFrame::done(&response)).await;
+                        }
+                        Ok(Err(error)) => {
+                            let message = error.details.clone().unwrap_or(error.error.clone());
+                            let _ = tx.send(AgentStreamFrame::error(message, Some(session_id.clone()))).await;
+                        }
+                        Err(error) => {
+                            let _ = tx.send(AgentStreamFrame::error(error.to_string(), Some(session_id.clone()))).await;
+                        }
+                    }
+                    break;
+                }
+                event = subscription.recv() => {
+                    let Ok(event) = event else { continue; };
+                    let frame = match event {
+                        AgentEvent::RunStarted { session_id: event_session_id, .. } if event_session_id == session_id => {
+                            Some(AgentStreamFrame::status("thinking", Some(event_session_id)))
+                        }
+                        AgentEvent::ThinkingDelta { session_id: event_session_id, delta } if event_session_id == session_id => {
+                            Some(AgentStreamFrame::thinking(delta, event_session_id))
+                        }
+                        AgentEvent::TextDelta { session_id: event_session_id, delta } if event_session_id == session_id => {
+                            Some(AgentStreamFrame::answer(delta, event_session_id))
+                        }
+                        AgentEvent::ToolCallStarted { session_id: event_session_id, tool, .. } if event_session_id == session_id => {
+                            Some(AgentStreamFrame::tool("tool_call_started", event_session_id, tool, Some("Executando tool".to_string())))
+                        }
+                        AgentEvent::ToolCallCompleted { session_id: event_session_id, tool, result_preview } if event_session_id == session_id => {
+                            Some(AgentStreamFrame::tool("tool_call_completed", event_session_id, tool, Some(result_preview)))
+                        }
+                        AgentEvent::ToolCallDenied { session_id: event_session_id, tool, reason } if event_session_id == session_id => {
+                            Some(AgentStreamFrame::tool("tool_call_denied", event_session_id, tool, Some(reason)))
+                        }
+                        AgentEvent::RunFailed { session_id: event_session_id, error } if event_session_id == session_id => {
+                            Some(AgentStreamFrame::error(error, Some(event_session_id)))
+                        }
+                        _ => None,
+                    };
+
+                    if let Some(frame) = frame {
+                        if tx.send(frame).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    });
+
+    let stream = ReceiverStream::new(rx).map(|event| {
+        let mut payload = serde_json::to_vec(&event).unwrap_or_else(|_| {
+            b"{\"event\":\"error\",\"message\":\"serialization failed\"}".to_vec()
+        });
+        payload.push(b'\n');
+        Ok::<Bytes, io::Error>(Bytes::from(payload))
+    });
+
+    let body = Body::from_stream(stream);
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", "application/x-ndjson; charset=utf-8")
+        .header("Cache-Control", "no-cache")
+        .body(body)
+        .map_err(|error| AgentApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "stream_build_failed", Some(error.to_string())))
 }
 
 /// GET /agent/providers

@@ -818,7 +818,7 @@
       }
 
       const reader = res.body.getReader();
-      const decoder = new TextDecoder();
+      const decoder = createStreamDecoder();
       let buf = '';
 
       while (true) {
@@ -928,6 +928,77 @@
   function updateAnswer(el, text) {
     const c = el?.querySelector('.msg-content');
     if (c) c.innerHTML = renderMarkdown(text);
+  }
+
+  function createStreamDecoder() {
+    const Decoder = window.TextDecoder || globalThis.TextDecoder;
+    if (!Decoder) throw new Error('Streaming indisponivel: TextDecoder nao encontrado');
+    return new Decoder();
+  }
+
+  async function sendAgentMessageStreaming(payload, assistantEl) {
+    let thinking = '';
+    let answer = '';
+    let metrics = {};
+
+    const res = await fetch(state.daemonUrl + '/agent/stream', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...payload, streaming: true }),
+    });
+
+    if (!res.ok) {
+      if (res.status === 404 || res.status === 405 || res.status === 501) return null;
+      throw new Error(`HTTP ${res.status}`);
+    }
+
+    const reader = res.body?.getReader?.();
+    if (!reader) return null;
+    const decoder = createStreamDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let idx;
+      while ((idx = buffer.indexOf('\n')) >= 0) {
+        const line = buffer.slice(0, idx).trim();
+        buffer = buffer.slice(idx + 1);
+        if (!line) continue;
+        const evt = JSON.parse(line);
+        if (evt.event === 'status') {
+          updateStreamStatus(assistantEl, evt.status);
+        } else if (evt.event === 'thinking_delta') {
+          thinking += evt.delta || '';
+          updateThinking(assistantEl, thinking);
+        } else if (evt.event === 'answer_delta') {
+          answer += evt.delta || '';
+          updateAnswer(assistantEl, answer);
+        } else if (evt.event === 'tool_call_started') {
+          thinking += `\nExecutando tool '${evt.tool || '?'}'...`;
+          updateThinking(assistantEl, thinking.trim());
+        } else if (evt.event === 'tool_call_completed') {
+          const preview = evt.message ? `: ${evt.message}` : '';
+          thinking += `\nTool '${evt.tool || '?'}' concluida${preview}`;
+          updateThinking(assistantEl, thinking.trim());
+        } else if (evt.event === 'tool_call_denied') {
+          const preview = evt.message ? `: ${evt.message}` : '';
+          thinking += `\nTool '${evt.tool || '?'}' negada${preview}`;
+          updateThinking(assistantEl, thinking.trim());
+        } else if (evt.event === 'done') {
+          metrics = { ...metrics, ...evt };
+        } else if (evt.event === 'error') {
+          throw new Error(evt.message || 'Falha no streaming do agent');
+        }
+      }
+    }
+
+    if (answer) {
+      state.messages.push({ role: 'assistant', content: answer });
+    }
+    if (metrics?.total_tokens) addMetrics(assistantEl, metrics);
+    return { answer, metrics, session_id: metrics?.session_id || payload.session_id || null };
   }
 
   function addMetrics(el, m) {
@@ -1563,16 +1634,25 @@
         approval_mode: state.agentConfig?.approval_mode || 'ask',
         max_iterations: 25,
       };
-      const res = await api('/agent/run', { method: 'POST', body: JSON.stringify(payload) });
+      let res = null;
+      const streamed = await sendAgentMessageStreaming(payload, agDiv);
+      if (!streamed) {
+        res = await api('/agent/run', { method: 'POST', body: JSON.stringify(payload) });
+      } else if (streamed.session_id) {
+        state.currentSessionId = streamed.session_id;
+        await loadSessions();
+      }
       if (res?.session_id) {
         state.currentSessionId = res.session_id;
         await loadSessions();
       } else {
         updateAgentWorkspaceSummary();
       }
-      const content = res?.final_response || 'Sem resposta.';
-      agDiv.querySelector('.msg-content').innerHTML = renderMarkdown(content);
-      if (res?.total_tokens) addMetrics(agDiv, res);
+      if (res) {
+        const content = res?.final_response || 'Sem resposta.';
+        agDiv.querySelector('.msg-content').innerHTML = renderMarkdown(content);
+        if (res?.total_tokens) addMetrics(agDiv, res);
+      }
     } catch (e) {
       agDiv.querySelector('.msg-content').innerHTML = `<span style="color:var(--rose)">Erro: ${esc(e.message)}</span>`;
     }
