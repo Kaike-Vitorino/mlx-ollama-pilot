@@ -408,36 +408,13 @@
               <div class="agent-view active" id="agent-view-workspace">
                 <div class="agent-workspace-grid">
                   <div class="agent-conversation-shell">
-                    <div class="agent-summary-strip">
-                      <article class="agent-summary-card">
-                        <span class="agent-summary-label">Sessao atual</span>
-                        <strong id="agent-current-session">Nenhuma sessao ativa</strong>
-                        <span id="agent-current-session-meta">Crie uma sessao ou selecione uma existente na faixa acima.</span>
-                      </article>
-                      <article class="agent-summary-card">
-                        <span class="agent-summary-label">Modelo</span>
-                        <strong id="agent-current-model">Nenhum modelo selecionado</strong>
-                        <span id="agent-current-provider">Provider aguardando handshake</span>
-                      </article>
-                      <article class="agent-summary-card">
-                        <span class="agent-summary-label">Politica</span>
-                        <strong id="agent-current-execution">Exec full</strong>
-                        <span id="agent-current-approval">Approval ask</span>
-                      </article>
-                      <article class="agent-summary-card">
-                        <span class="agent-summary-label">Cobertura</span>
-                        <div class="agent-summary-metrics">
-                          <span><strong id="agent-skill-count">0</strong> skills</span>
-                          <span><strong id="agent-tool-count">0</strong> tools</span>
-                          <span><strong id="agent-channel-count">0</strong> channels</span>
-                          <span><strong id="agent-audit-count">0</strong> audit</span>
-                        </div>
-                      </article>
-                    </div>
-
                     <div class="agent-session-strip">
-                      <div class="agent-sidebar-head">
-                        <h3>Sessoes</h3>
+                      <div class="agent-session-strip-head">
+                        <div class="agent-session-summary">
+                          <span class="agent-summary-label">Sessao atual</span>
+                          <strong id="agent-current-session">Nenhuma sessao ativa</strong>
+                          <span id="agent-current-session-meta">Crie uma sessao ou selecione uma existente na faixa abaixo.</span>
+                        </div>
                         <div class="agent-strip-meta">
                           <span class="agent-meta-pill" id="agent-session-count">0</span>
                           <span class="agent-meta-pill status-offline" id="agent-daemon-status">Offline</span>
@@ -448,24 +425,14 @@
                       </div>
                     </div>
 
-                    <div class="agent-runtime-strip">
-                      <span class="agent-runtime-pill" id="agent-provider-pill">Provider -</span>
-                      <span class="agent-runtime-pill" id="agent-model-pill">Model -</span>
-                      <span class="agent-runtime-pill" id="agent-exec-pill">Exec -</span>
-                      <span class="agent-runtime-pill" id="agent-approval-pill">Approval -</span>
-                    </div>
-
                     <div class="agent-prompt-grid">
                       <button class="agent-prompt-card" type="button" data-agent-prompt="Revise a configuracao atual do agent e sugira ajustes de runtime.">
-                        <span class="agent-prompt-kicker">Config</span>
                         <span class="agent-prompt-title">Revisar runtime e politicas</span>
                       </button>
                       <button class="agent-prompt-card" type="button" data-agent-prompt="Liste os channels e diga quais precisam de acao imediata.">
-                        <span class="agent-prompt-kicker">Channels</span>
                         <span class="agent-prompt-title">Auditar integracoes ativas</span>
                       </button>
                       <button class="agent-prompt-card" type="button" data-agent-prompt="Investigue os ultimos eventos de auditoria e resuma riscos operacionais.">
-                        <span class="agent-prompt-kicker">Audit</span>
                         <span class="agent-prompt-title">Resumir riscos recentes</span>
                       </button>
                     </div>
@@ -607,10 +574,22 @@
                     </div>
                   </div>
                 </div>
+                </div>
               </div>
-            </div>
 
+            <span id="agent-current-model" class="hidden-metric">Nenhum modelo selecionado</span>
+            <span id="agent-current-provider" class="hidden-metric">Provider aguardando handshake</span>
+            <span id="agent-current-execution" class="hidden-metric">Exec full</span>
+            <span id="agent-current-approval" class="hidden-metric">Approval ask</span>
+            <span id="agent-provider-pill" class="hidden-metric">Provider -</span>
+            <span id="agent-model-pill" class="hidden-metric">Model -</span>
+            <span id="agent-exec-pill" class="hidden-metric">Exec -</span>
+            <span id="agent-approval-pill" class="hidden-metric">Approval -</span>
+            <span id="agent-channel-count" class="hidden-metric">0</span>
             <span id="agent-plugin-count" class="hidden-metric">0</span>
+            <span id="agent-skill-count" class="hidden-metric">0</span>
+            <span id="agent-tool-count" class="hidden-metric">0</span>
+            <span id="agent-audit-count" class="hidden-metric">0</span>
           </div>
         </section>
 
