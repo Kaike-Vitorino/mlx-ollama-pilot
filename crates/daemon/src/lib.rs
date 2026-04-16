@@ -1060,9 +1060,7 @@ async fn chat_stream(
         RoutedProvider::Llamacpp => {
             spawn_provider_compat_stream(state.llamacpp_provider.clone(), normalized_request)
         }
-        RoutedProvider::Ollama => {
-            spawn_provider_compat_stream(state.ollama_provider.clone(), normalized_request)
-        }
+        RoutedProvider::Ollama => spawn_ollama_stream(state.ollama_provider.clone(), normalized_request),
     };
 
     let stream = ReceiverStream::new(receiver).map(|event| {
@@ -1082,6 +1080,267 @@ async fn chat_stream(
         .map_err(|error| AppError::NotFound(format!("falha ao criar resposta: {error}")))?;
 
     Ok(response)
+}
+
+fn spawn_ollama_stream(
+    provider: Arc<OllamaProvider>,
+    request: ChatRequest,
+) -> mpsc::Receiver<ChatStreamEvent> {
+    let (tx, rx) = mpsc::channel(64);
+
+    tokio::spawn(async move {
+        let started = Instant::now();
+        if tx.send(ChatStreamEvent::status("thinking")).await.is_err() {
+            return;
+        }
+
+        let response = match provider
+            .begin_chat_stream(&request.model_id, &request.messages, &request.options)
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                let _ = tx.send(ChatStreamEvent::error(error.to_string())).await;
+                return;
+            }
+        };
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let message = response.text().await.unwrap_or_default();
+            let _ = tx
+                .send(ChatStreamEvent::error(format!(
+                    "ollama stream falhou com HTTP {status}: {message}"
+                )))
+                .await;
+            return;
+        }
+
+        let mut parser = OllamaThinkingParser::default();
+        let mut buffer = Vec::<u8>::new();
+        let mut prompt_tokens = 0_usize;
+        let mut completion_tokens = 0_usize;
+        let mut total_latency_ms = started.elapsed().as_millis() as u64;
+        let mut status_sent = false;
+        let mut response = response;
+
+        loop {
+            match response.chunk().await {
+                Ok(Some(chunk)) => {
+                    buffer.extend_from_slice(&chunk);
+
+                    while let Some(newline_index) = buffer.iter().position(|byte| *byte == b'\n') {
+                        let line_bytes: Vec<u8> = buffer.drain(..=newline_index).collect();
+                        let line = String::from_utf8_lossy(&line_bytes);
+                        let trimmed = line.trim();
+                        if trimmed.is_empty() {
+                            continue;
+                        }
+
+                        let payload: serde_json::Value = match serde_json::from_str(trimmed) {
+                            Ok(payload) => payload,
+                            Err(error) => {
+                                let _ = tx
+                                    .send(ChatStreamEvent::error(format!(
+                                        "falha parseando stream do Ollama: {error}"
+                                    )))
+                                    .await;
+                                return;
+                            }
+                        };
+
+                        let content = payload
+                            .pointer("/message/content")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default();
+
+                        if !status_sent && !content.is_empty() {
+                            status_sent = true;
+                            if tx.send(ChatStreamEvent::status("answering")).await.is_err() {
+                                return;
+                            }
+                        }
+
+                        for event in parser.push(content) {
+                            if tx.send(event).await.is_err() {
+                                return;
+                            }
+                        }
+
+                        if payload.get("done").and_then(Value::as_bool).unwrap_or(false) {
+                            prompt_tokens = payload
+                                .get("prompt_eval_count")
+                                .and_then(Value::as_u64)
+                                .unwrap_or(0) as usize;
+                            completion_tokens = payload
+                                .get("eval_count")
+                                .and_then(Value::as_u64)
+                                .unwrap_or(completion_tokens as u64)
+                                as usize;
+                            total_latency_ms = payload
+                                .get("total_duration")
+                                .and_then(Value::as_u64)
+                                .map(|nanos| nanos / 1_000_000)
+                                .unwrap_or_else(|| started.elapsed().as_millis() as u64);
+
+                            for event in parser.finish() {
+                                if tx.send(event).await.is_err() {
+                                    return;
+                                }
+                            }
+
+                            let _ = tx
+                                .send(ChatStreamEvent {
+                                    event: "done".to_string(),
+                                    status: Some("completed".to_string()),
+                                    delta: None,
+                                    message: None,
+                                    prompt_tokens: Some(prompt_tokens),
+                                    completion_tokens: Some(completion_tokens),
+                                    total_tokens: Some(prompt_tokens + completion_tokens),
+                                    prompt_tps: None,
+                                    generation_tps: None,
+                                    peak_memory_gb: None,
+                                    latency_ms: Some(total_latency_ms),
+                                    raw_metrics: None,
+                                    airllm_required: None,
+                                    airllm_used: None,
+                                })
+                                .await;
+                            return;
+                        }
+                    }
+                }
+                Ok(None) => {
+                    if !buffer.is_empty() {
+                        let line = String::from_utf8_lossy(&buffer);
+                        let trimmed = line.trim();
+                        if !trimmed.is_empty() {
+                            if let Ok(payload) = serde_json::from_str::<Value>(trimmed) {
+                                let content = payload
+                                    .pointer("/message/content")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or_default();
+
+                                for event in parser.push(content) {
+                                    if tx.send(event).await.is_err() {
+                                        return;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    for event in parser.finish() {
+                        if tx.send(event).await.is_err() {
+                            return;
+                        }
+                    }
+                    let _ = tx
+                        .send(ChatStreamEvent {
+                            event: "done".to_string(),
+                            status: Some("completed".to_string()),
+                            delta: None,
+                            message: None,
+                            prompt_tokens: Some(prompt_tokens),
+                            completion_tokens: Some(completion_tokens),
+                            total_tokens: Some(prompt_tokens + completion_tokens),
+                            prompt_tps: None,
+                            generation_tps: None,
+                            peak_memory_gb: None,
+                            latency_ms: Some(total_latency_ms),
+                            raw_metrics: None,
+                            airllm_required: None,
+                            airllm_used: None,
+                        })
+                        .await;
+                    return;
+                }
+                Err(error) => {
+                    let _ = tx
+                        .send(ChatStreamEvent::error(format!(
+                            "falha lendo stream do Ollama: {error}"
+                        )))
+                        .await;
+                    return;
+                }
+            }
+        }
+    });
+
+    rx
+}
+
+#[derive(Default)]
+struct OllamaThinkingParser {
+    carry: String,
+    in_thinking: bool,
+}
+
+impl OllamaThinkingParser {
+    fn push(&mut self, chunk: &str) -> Vec<ChatStreamEvent> {
+        if chunk.is_empty() {
+            return Vec::new();
+        }
+
+        let mut events = Vec::new();
+        let mut remaining = format!("{}{}", self.carry, chunk);
+        self.carry.clear();
+
+        loop {
+            let tag = if self.in_thinking { "</think>" } else { "<think>" };
+
+            if let Some(index) = remaining.find(tag) {
+                let head = remaining[..index].to_string();
+                self.emit_segment(&mut events, head);
+                remaining = remaining[index + tag.len()..].to_string();
+                self.in_thinking = !self.in_thinking;
+                continue;
+            }
+
+            let split_index = split_for_partial_tag(&remaining, tag);
+            let head = remaining[..split_index].to_string();
+            self.emit_segment(&mut events, head);
+            self.carry = remaining[split_index..].to_string();
+            break;
+        }
+
+        events
+    }
+
+    fn finish(&mut self) -> Vec<ChatStreamEvent> {
+        let mut events = Vec::new();
+        if !self.carry.is_empty() {
+            let tail = std::mem::take(&mut self.carry);
+            self.emit_segment(&mut events, tail);
+        }
+        events
+    }
+
+    fn emit_segment(&self, events: &mut Vec<ChatStreamEvent>, segment: String) {
+        if segment.is_empty() {
+            return;
+        }
+
+        if self.in_thinking {
+            events.push(ChatStreamEvent::thinking_delta(segment));
+        } else {
+            events.push(ChatStreamEvent::answer_delta(segment));
+        }
+    }
+}
+
+fn split_for_partial_tag(input: &str, tag: &str) -> usize {
+    let mut keep = 0_usize;
+    let max = input.len().min(tag.len().saturating_sub(1));
+
+    for length in 1..=max {
+        if input.ends_with(&tag[..length]) {
+            keep = length;
+        }
+    }
+
+    input.len().saturating_sub(keep)
 }
 
 async fn brave_web_search(
