@@ -1,4 +1,4 @@
-//! Skill loader — discovers and loads skills from `workspace_root/skills/`.
+//! Skill loader — discovers and loads skills from project skill directories.
 //!
 //! Each skill is a directory containing a `SKILL.md` file with YAML
 //! frontmatter. The loader parses, filters, and assembles
@@ -8,6 +8,7 @@ use crate::frontmatter::{check_skill_requirements, parse_frontmatter, to_skill_p
 use crate::resolver::ResolverError;
 use crate::types::{RequirementContext, SkillPackage, SkillSource, TrustLevel};
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use tracing::{debug, warn};
 
@@ -34,8 +35,12 @@ impl Default for SkillLimits {
 
 /// Loads skills from the filesystem.
 pub struct SkillLoader {
-    /// Root directory to search for skills (e.g. `workspace_root/skills/`).
-    skills_dir: PathBuf,
+    /// Ordered directories to search for skills.
+    ///
+    /// The loader preserves the existing legacy priority by checking
+    /// `skills/` before `.claude/skills/`. Duplicate names found in later
+    /// directories are ignored.
+    skills_dirs: Vec<PathBuf>,
     /// Limits for skill loading.
     limits: SkillLimits,
 }
@@ -49,12 +54,29 @@ pub struct DiscoveredSkill {
 impl SkillLoader {
     /// Create a new loader pointing at `skills_dir`.
     pub fn new(skills_dir: PathBuf, limits: SkillLimits) -> Self {
-        Self { skills_dir, limits }
+        Self::with_dirs(vec![skills_dir], limits)
     }
 
-    /// Create a loader from a workspace root (appends `skills/`).
+    /// Create a loader from an explicit ordered list of skill directories.
+    pub fn with_dirs(skills_dirs: Vec<PathBuf>, limits: SkillLimits) -> Self {
+        Self {
+            skills_dirs,
+            limits,
+        }
+    }
+
+    /// Create a loader from a workspace root.
+    ///
+    /// Supports both the legacy `skills/` layout and the Claude-compatible
+    /// `.claude/skills/` layout.
     pub fn from_workspace(workspace_root: &Path, limits: SkillLimits) -> Self {
-        Self::new(workspace_root.join("skills"), limits)
+        Self::with_dirs(
+            vec![
+                workspace_root.join("skills"),
+                workspace_root.join(".claude").join("skills"),
+            ],
+            limits,
+        )
     }
 
     /// Discover and load all skills from the skills directory.
@@ -88,63 +110,85 @@ impl SkillLoader {
         &self,
         context: &RequirementContext,
     ) -> Result<Vec<DiscoveredSkill>, ResolverError> {
-        if !self.skills_dir.exists() {
-            debug!(dir = %self.skills_dir.display(), "skills directory not found, returning empty");
+        let existing_dirs = self
+            .skills_dirs
+            .iter()
+            .filter(|dir| dir.exists())
+            .cloned()
+            .collect::<Vec<_>>();
+
+        if existing_dirs.is_empty() {
+            debug!(dirs = ?self.skills_dirs, "skills directories not found, returning empty");
             return Ok(Vec::new());
         }
 
         let mut skills = Vec::new();
-        let mut entries = tokio::fs::read_dir(&self.skills_dir)
-            .await
-            .map_err(ResolverError::Io)?;
+        let mut seen_names = HashSet::new();
 
-        while let Some(entry) = entries.next_entry().await.map_err(ResolverError::Io)? {
-            let path = entry.path();
+        for skills_dir in existing_dirs {
+            let mut entries = tokio::fs::read_dir(&skills_dir)
+                .await
+                .map_err(ResolverError::Io)?;
 
-            // Each skill is a directory containing SKILL.md.
-            let skill_file = if path.is_dir() {
-                path.join("SKILL.md")
-            } else if path.is_file()
-                && path
-                    .file_name()
-                    .is_some_and(|f| f.eq_ignore_ascii_case("SKILL.md"))
-            {
-                // Also accept SKILL.md directly in skills/ (flat layout).
-                path.clone()
-            } else {
-                continue;
-            };
+            while let Some(entry) = entries.next_entry().await.map_err(ResolverError::Io)? {
+                let path = entry.path();
 
-            if !skill_file.exists() {
-                continue;
-            }
+                // Each skill is a directory containing SKILL.md.
+                let skill_file = if path.is_dir() {
+                    path.join("SKILL.md")
+                } else if path.is_file()
+                    && path
+                        .file_name()
+                        .is_some_and(|f| f.eq_ignore_ascii_case("SKILL.md"))
+                {
+                    // Also accept SKILL.md directly in the root (flat layout).
+                    path.clone()
+                } else {
+                    continue;
+                };
 
-            match self.load_single(&skill_file).await {
-                Ok(pkg) => {
-                    let req_check = check_skill_requirements(&pkg, context);
-                    if !req_check.satisfied {
-                        debug!(
-                            skill = %pkg.name,
-                            os_supported = req_check.os_supported,
-                            missing_bins = ?req_check.missing_bins,
-                            missing_any_bins = ?req_check.missing_any_bins,
-                            missing_env = ?req_check.missing_env,
-                            missing_config = ?req_check.missing_config,
-                            "skill discovered but not currently eligible"
+                if !skill_file.exists() {
+                    continue;
+                }
+
+                match self.load_single(&skill_file).await {
+                    Ok(pkg) => {
+                        let normalized_name = pkg.name.to_ascii_lowercase();
+                        if !seen_names.insert(normalized_name.clone()) {
+                            warn!(
+                                skill = %pkg.name,
+                                file = %skill_file.display(),
+                                directory = %skills_dir.display(),
+                                "duplicate skill name discovered in lower-priority directory, skipping"
+                            );
+                            continue;
+                        }
+
+                        let req_check = check_skill_requirements(&pkg, context);
+                        if !req_check.satisfied {
+                            debug!(
+                                skill = %pkg.name,
+                                os_supported = req_check.os_supported,
+                                missing_bins = ?req_check.missing_bins,
+                                missing_any_bins = ?req_check.missing_any_bins,
+                                missing_env = ?req_check.missing_env,
+                                missing_config = ?req_check.missing_config,
+                                "skill discovered but not currently eligible"
+                            );
+                        }
+
+                        skills.push(DiscoveredSkill {
+                            package: pkg,
+                            requirements: req_check,
+                        });
+                    }
+                    Err(e) => {
+                        warn!(
+                            file = %skill_file.display(),
+                            error = %e,
+                            "failed to parse SKILL.md, skipping"
                         );
                     }
-
-                    skills.push(DiscoveredSkill {
-                        package: pkg,
-                        requirements: req_check,
-                    });
-                }
-                Err(e) => {
-                    warn!(
-                        file = %skill_file.display(),
-                        error = %e,
-                        "failed to parse SKILL.md, skipping"
-                    );
                 }
             }
         }
@@ -307,6 +351,26 @@ mod tests {
         fs::write(skill_dir.join("SKILL.md"), content).unwrap();
     }
 
+    fn create_fake_bin(dir: &Path, name: &str) {
+        #[cfg(windows)]
+        let path = dir.join(format!("{name}.cmd"));
+        #[cfg(not(windows))]
+        let path = dir.join(name);
+
+        #[cfg(windows)]
+        fs::write(&path, "@echo off\r\nexit /b 0\r\n").unwrap();
+        #[cfg(not(windows))]
+        fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&path).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&path, perms).unwrap();
+        }
+    }
+
     #[tokio::test]
     async fn load_all_from_workspace() {
         let tmp = std::env::temp_dir().join("skill_loader_test");
@@ -355,6 +419,114 @@ World!"#,
     }
 
     #[tokio::test]
+    async fn load_all_from_claude_compat_directory() {
+        let tmp = std::env::temp_dir().join("skill_loader_claude_test");
+        let skills = tmp.join(".claude").join("skills");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&skills).unwrap();
+
+        create_test_skill(
+            &skills,
+            "repo-onboarding",
+            r#"---
+name: repo-onboarding
+description: Understand the repository quickly.
+---
+
+# Repo Onboarding
+"#,
+        );
+
+        let loader = SkillLoader::from_workspace(&tmp, SkillLimits::default());
+        let loaded = loader.load_all().await.unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].name, "repo-onboarding");
+
+        fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[tokio::test]
+    async fn load_merges_legacy_and_claude_skill_roots() {
+        let tmp = std::env::temp_dir().join("skill_loader_merge_test");
+        let legacy = tmp.join("skills");
+        let compat = tmp.join(".claude").join("skills");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&legacy).unwrap();
+        fs::create_dir_all(&compat).unwrap();
+
+        create_test_skill(
+            &legacy,
+            "legacy-skill",
+            r#"---
+name: legacy-skill
+description: Legacy layout.
+---
+"#,
+        );
+        create_test_skill(
+            &compat,
+            "compat-skill",
+            r#"---
+name: compat-skill
+description: Claude layout.
+---
+"#,
+        );
+
+        let loader = SkillLoader::from_workspace(&tmp, SkillLimits::default());
+        let loaded = loader.load_all().await.unwrap();
+        let names = loaded
+            .iter()
+            .map(|skill| skill.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(loaded.len(), 2);
+        assert!(names.contains(&"legacy-skill"));
+        assert!(names.contains(&"compat-skill"));
+
+        fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[tokio::test]
+    async fn load_prefers_legacy_skill_when_duplicate_name_exists() {
+        let tmp = std::env::temp_dir().join("skill_loader_duplicate_test");
+        let legacy = tmp.join("skills");
+        let compat = tmp.join(".claude").join("skills");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&legacy).unwrap();
+        fs::create_dir_all(&compat).unwrap();
+
+        create_test_skill(
+            &legacy,
+            "reviewer",
+            r#"---
+name: reviewer
+description: Legacy reviewer.
+---
+
+legacy
+"#,
+        );
+        create_test_skill(
+            &compat,
+            "reviewer",
+            r#"---
+name: reviewer
+description: Compat reviewer.
+---
+
+compat
+"#,
+        );
+
+        let loader = SkillLoader::from_workspace(&tmp, SkillLimits::default());
+        let loaded = loader.load_all().await.unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].description, "Legacy reviewer.");
+
+        fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[tokio::test]
     async fn load_skips_nonexistent_dir() {
         let loader = SkillLoader::from_workspace(
             Path::new("/nonexistent/path/12345"),
@@ -397,15 +569,7 @@ World!"#,
         fs::create_dir_all(&bins).unwrap();
 
         for bin in ["obsidian", "wa-cli", "gh", "curl"] {
-            let path = bins.join(bin);
-            fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let mut perms = fs::metadata(&path).unwrap().permissions();
-                perms.set_mode(0o755);
-                fs::set_permissions(&path, perms).unwrap();
-            }
+            create_fake_bin(&bins, bin);
         }
 
         let original_path = std::env::var_os("PATH");
