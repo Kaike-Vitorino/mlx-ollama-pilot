@@ -13,8 +13,8 @@ use crate::registry::ToolRegistry;
 use crate::tool_catalog::ToolProfileName;
 use mlx_agent_tools::ExecutionMode;
 use mlx_ollama_core::{
-    ChatMessage, ChatToolsRequest, FunctionDef, GenerationOptions, MessageRole, ModelProvider,
-    ProviderError, RuntimeProviderConfig, TokenUsage, ToolCallRequest,
+    ChatMessage, ChatRequest, ChatToolsRequest, FunctionDef, GenerationOptions, MessageRole,
+    ModelProvider, ProviderError, RuntimeProviderConfig, TokenUsage, ToolCallRequest,
 };
 use sha2::{Digest, Sha256};
 use std::borrow::Cow;
@@ -289,29 +289,55 @@ impl AgentLoop {
                     .collect::<Vec<_>>()
             });
 
-            let response = match self
+            let options = GenerationOptions {
+                temperature: Some(self.config.temperature.unwrap_or(profile.temperature_default)),
+                max_tokens: Some(self.config.max_tokens_per_turn),
+                top_p: None,
+                airllm_enabled: None,
+            };
+            let tool_request = ChatToolsRequest {
+                model_id: self.config.model_id.clone(),
+                messages: prompt.messages.clone(),
+                tools: prompt.tools,
+                options: options.clone(),
+            };
+            let direct_request = ChatRequest {
+                model_id: self.config.model_id.clone(),
+                messages: prompt.messages,
+                options,
+            };
+
+            let (response, used_direct_fallback) = match self
                 .provider
-                .chat_with_tools_with_runtime(
-                    ChatToolsRequest {
-                        model_id: self.config.model_id.clone(),
-                        messages: prompt.messages,
-                        tools: prompt.tools,
-                        options: GenerationOptions {
-                            temperature: Some(
-                                self.config
-                                    .temperature
-                                    .unwrap_or(profile.temperature_default),
-                            ),
-                            max_tokens: Some(self.config.max_tokens_per_turn),
-                            top_p: None,
-                            airllm_enabled: None,
-                        },
-                    },
-                    self.config.provider_runtime.clone(),
-                )
+                .chat_with_tools_with_runtime(tool_request, self.config.provider_runtime.clone())
                 .await
             {
-                Ok(response) => response,
+                Ok(response) => (response, false),
+                Err(error)
+                    if self.config.enable_tool_call_fallback
+                        && should_fallback_to_direct_chat(&error) =>
+                {
+                    self.event_bus.emit(AgentEvent::ThinkingDelta {
+                        session_id: session_id.clone(),
+                        delta: "Modelo atual nao suporta tools; seguindo em modo de resposta direta.\n"
+                            .to_string(),
+                    });
+
+                    match self
+                        .provider
+                        .chat_with_runtime(direct_request, self.config.provider_runtime.clone())
+                        .await
+                    {
+                        Ok(response) => (response, true),
+                        Err(fallback_error) => {
+                            self.event_bus.emit(AgentEvent::RunFailed {
+                                session_id: session_id.clone(),
+                                error: fallback_error.to_string(),
+                            });
+                            return Err(fallback_error.into());
+                        }
+                    }
+                }
                 Err(error) => {
                     self.event_bus.emit(AgentEvent::RunFailed {
                         session_id: session_id.clone(),
@@ -330,14 +356,16 @@ impl AgentLoop {
 
             // Check if there are tool calls.
             if assistant_msg.tool_calls.is_empty() {
-                if let Some(tool_names) = tool_names_for_reprompt {
-                    fallback_attempted = true;
-                    conversation.push(assistant_msg.clone());
-                    conversation.push(ChatMessage::text(
-                        MessageRole::User,
-                        PromptBuilder::tool_call_reprompt(&tool_names),
-                    ));
-                    continue;
+                if !used_direct_fallback {
+                    if let Some(tool_names) = tool_names_for_reprompt {
+                        fallback_attempted = true;
+                        conversation.push(assistant_msg.clone());
+                        conversation.push(ChatMessage::text(
+                            MessageRole::User,
+                            PromptBuilder::tool_call_reprompt(&tool_names),
+                        ));
+                        continue;
+                    }
                 }
 
                 // Final response — no more tool calls.
@@ -853,6 +881,16 @@ fn elapsed_ms_u64(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_millis())
         .unwrap_or(u64::MAX)
         .max(1)
+}
+
+fn should_fallback_to_direct_chat(error: &ProviderError) -> bool {
+    let message = error.to_string().to_ascii_lowercase();
+    message.contains("does not support tools")
+        || message.contains("does not support tool-calling")
+        || message.contains("does not support tool calling")
+        || message.contains("tools are not supported")
+        || message.contains("tool calling")
+        || message.contains("tool-calling")
 }
 
 fn hash_sha256_hex(input: &str) -> String {
@@ -1380,5 +1418,69 @@ mod tests {
         assert_eq!(response.tool_calls_made, 1);
         assert_eq!(response.iterations, 3);
         assert!(response.content.contains("listed"));
+    }
+
+    #[tokio::test]
+    async fn agent_loop_falls_back_to_direct_chat_when_tools_are_unsupported() {
+        struct NoToolsProvider {
+            tool_calls: AtomicUsize,
+            direct_calls: AtomicUsize,
+        }
+
+        #[async_trait::async_trait]
+        impl ModelProvider for NoToolsProvider {
+            fn provider_id(&self) -> &'static str {
+                "ollama"
+            }
+
+            async fn list_models(&self) -> Result<Vec<ModelDescriptor>, ProviderError> {
+                Ok(vec![])
+            }
+
+            async fn chat(&self, _r: ChatRequest) -> Result<ChatResponse, ProviderError> {
+                self.direct_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(ChatResponse {
+                    model_id: "mock-model".into(),
+                    provider: "ollama".into(),
+                    message: ChatMessage::text(
+                        MessageRole::Assistant,
+                        "Resposta direta sem uso de tools.",
+                    ),
+                    usage: TokenUsage {
+                        prompt_tokens: 10,
+                        completion_tokens: 8,
+                        total_tokens: 18,
+                    },
+                    latency_ms: 15,
+                    raw_output: None,
+                })
+            }
+
+            async fn chat_with_tools(
+                &self,
+                _req: ChatToolsRequest,
+            ) -> Result<ChatResponse, ProviderError> {
+                self.tool_calls.fetch_add(1, Ordering::SeqCst);
+                Err(ProviderError::Unavailable {
+                    details: "registry.ollama.ai/library/deepseek-r1:8b does not support tools"
+                        .into(),
+                })
+            }
+        }
+
+        let provider = Arc::new(NoToolsProvider {
+            tool_calls: AtomicUsize::new(0),
+            direct_calls: AtomicUsize::new(0),
+        });
+        let mut agent = create_test_loop(provider.clone());
+        agent.config.enable_tool_call_fallback = true;
+
+        let response = agent.run("explique o estado atual").await.unwrap();
+
+        assert_eq!(response.iterations, 1);
+        assert_eq!(response.tool_calls_made, 0);
+        assert!(response.content.contains("Resposta direta"));
+        assert_eq!(provider.tool_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(provider.direct_calls.load(Ordering::SeqCst), 1);
     }
 }
