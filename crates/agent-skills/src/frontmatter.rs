@@ -115,14 +115,13 @@ pub fn parse_frontmatter(content: &str) -> Result<ParsedSkill, ResolverError> {
 }
 
 /// Extract `CompatMetadata` from the `metadata` JSON value,
-/// checking `metadata.openclaw` first, then `metadata.nanobot`.
+/// checking compatibility keys used by the supported agent ecosystems.
 fn extract_compat_metadata(metadata: &Option<serde_json::Value>) -> CompatMetadata {
     let Some(meta) = metadata else {
         return CompatMetadata::default();
     };
 
-    // Try openclaw first, then nanobot.
-    for key in &["openclaw", "nanobot"] {
+    for key in &["openclaw", "nanobot", "claude", "codex"] {
         if let Some(inner) = meta.get(key) {
             if let Ok(parsed) = serde_json::from_value::<CompatMetadata>(inner.clone()) {
                 return parsed;
@@ -448,6 +447,22 @@ metadata:
 # Summarize
 "#;
 
+    const CLAUDE_COMPAT_SKILL: &str = r#"---
+name: claude-ops
+description: "Claude compatibility metadata"
+metadata:
+  claude:
+    requires:
+      bins:
+        - rg
+    capabilities:
+      fs_read: true
+      exec: true
+---
+
+# Claude Ops
+"#;
+
     #[test]
     fn parse_valid_frontmatter() {
         let parsed = parse_frontmatter(VALID_SKILL).unwrap();
@@ -538,6 +553,20 @@ metadata:
         assert_eq!(pkg.primary_env.as_deref(), Some("OPENAI_API_KEY"));
         assert_eq!(pkg.requires.env, vec!["OPENAI_API_KEY".to_string()]);
         assert_eq!(pkg.requires.config, vec!["provider".to_string()]);
+    }
+
+    #[test]
+    fn parse_claude_compat_metadata() {
+        let parsed = parse_frontmatter(CLAUDE_COMPAT_SKILL).unwrap();
+        let pkg = to_skill_package(
+            &parsed,
+            Path::new("/skills/claude-ops/SKILL.md"),
+            SkillSource::Workspace,
+            TrustLevel::Local,
+        );
+        assert_eq!(pkg.requires.bins, vec!["rg".to_string()]);
+        assert!(pkg.capabilities.allows_fs_read());
+        assert!(pkg.capabilities.allows_exec());
     }
 
     #[test]

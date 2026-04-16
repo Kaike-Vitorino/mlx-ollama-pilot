@@ -67,16 +67,10 @@ impl SkillLoader {
 
     /// Create a loader from a workspace root.
     ///
-    /// Supports both the legacy `skills/` layout and the Claude-compatible
-    /// `.claude/skills/` layout.
+    /// Supports the legacy `skills/` layout plus Claude/OpenClaw/Codex-style
+    /// project-local roots.
     pub fn from_workspace(workspace_root: &Path, limits: SkillLimits) -> Self {
-        Self::with_dirs(
-            vec![
-                workspace_root.join("skills"),
-                workspace_root.join(".claude").join("skills"),
-            ],
-            limits,
-        )
+        Self::with_dirs(workspace_skill_dirs(workspace_root), limits)
     }
 
     /// Discover and load all skills from the skills directory.
@@ -282,6 +276,15 @@ impl SkillLoader {
     }
 }
 
+fn workspace_skill_dirs(workspace_root: &Path) -> Vec<PathBuf> {
+    vec![
+        workspace_root.join("skills"),
+        workspace_root.join(".claude").join("skills"),
+        workspace_root.join(".openclaw").join("skills"),
+        workspace_root.join(".codex").join("skills"),
+    ]
+}
+
 fn sha256_hex(input: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(input);
@@ -446,6 +449,60 @@ description: Understand the repository quickly.
     }
 
     #[tokio::test]
+    async fn load_all_from_openclaw_compat_directory() {
+        let tmp = std::env::temp_dir().join("skill_loader_openclaw_test");
+        let skills = tmp.join(".openclaw").join("skills");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&skills).unwrap();
+
+        create_test_skill(
+            &skills,
+            "runtime-ops",
+            r#"---
+name: runtime-ops
+description: Manage OpenClaw runtime tasks.
+---
+
+# Runtime Ops
+"#,
+        );
+
+        let loader = SkillLoader::from_workspace(&tmp, SkillLimits::default());
+        let loaded = loader.load_all().await.unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].name, "runtime-ops");
+
+        fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[tokio::test]
+    async fn load_all_from_codex_compat_directory() {
+        let tmp = std::env::temp_dir().join("skill_loader_codex_test");
+        let skills = tmp.join(".codex").join("skills");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&skills).unwrap();
+
+        create_test_skill(
+            &skills,
+            "codex-review",
+            r#"---
+name: codex-review
+description: Review code with Codex-style workflow.
+---
+
+# Codex Review
+"#,
+        );
+
+        let loader = SkillLoader::from_workspace(&tmp, SkillLimits::default());
+        let loaded = loader.load_all().await.unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].name, "codex-review");
+
+        fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[tokio::test]
     async fn load_merges_legacy_and_claude_skill_roots() {
         let tmp = std::env::temp_dir().join("skill_loader_merge_test");
         let legacy = tmp.join("skills");
@@ -482,6 +539,71 @@ description: Claude layout.
         assert_eq!(loaded.len(), 2);
         assert!(names.contains(&"legacy-skill"));
         assert!(names.contains(&"compat-skill"));
+
+        fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[tokio::test]
+    async fn load_merges_all_compat_roots() {
+        let tmp = std::env::temp_dir().join("skill_loader_all_roots_test");
+        let legacy = tmp.join("skills");
+        let claude = tmp.join(".claude").join("skills");
+        let openclaw = tmp.join(".openclaw").join("skills");
+        let codex = tmp.join(".codex").join("skills");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&legacy).unwrap();
+        fs::create_dir_all(&claude).unwrap();
+        fs::create_dir_all(&openclaw).unwrap();
+        fs::create_dir_all(&codex).unwrap();
+
+        create_test_skill(
+            &legacy,
+            "legacy-skill",
+            r#"---
+name: legacy-skill
+description: Legacy layout.
+---
+"#,
+        );
+        create_test_skill(
+            &claude,
+            "claude-skill",
+            r#"---
+name: claude-skill
+description: Claude layout.
+---
+"#,
+        );
+        create_test_skill(
+            &openclaw,
+            "openclaw-skill",
+            r#"---
+name: openclaw-skill
+description: OpenClaw layout.
+---
+"#,
+        );
+        create_test_skill(
+            &codex,
+            "codex-skill",
+            r#"---
+name: codex-skill
+description: Codex layout.
+---
+"#,
+        );
+
+        let loader = SkillLoader::from_workspace(&tmp, SkillLimits::default());
+        let loaded = loader.load_all().await.unwrap();
+        let names = loaded
+            .iter()
+            .map(|skill| skill.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(loaded.len(), 4);
+        assert!(names.contains(&"legacy-skill"));
+        assert!(names.contains(&"claude-skill"));
+        assert!(names.contains(&"openclaw-skill"));
+        assert!(names.contains(&"codex-skill"));
 
         fs::remove_dir_all(&tmp).unwrap();
     }
