@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>MLX Pilot — Orbital Command</title>
+  <title>MLX Pilot - Orbital Command</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@200;300;400;500;600;700;800&family=Manrope:wght@300;400;500;600;700&family=JetBrains+Mono:wght@300;400;500;600&display=swap" rel="stylesheet" />
@@ -329,7 +329,7 @@
                   </div>
                 </div>
                 <div class="obs-card">
-                  <h4>Tools Disponíveis</h4>
+                  <h4>Tools Dispon&iacute;veis</h4>
                   <div class="skill-list obs-tools-list">
                     <span style="color:var(--text-tertiary);font-size:12px">Carregando...</span>
                   </div>
@@ -358,10 +358,10 @@
                 </div>
               </div>
               <div class="config-section">
-                <h4>Diretórios</h4>
+                <h4>Diret&oacute;rios</h4>
                 <div class="config-fields">
                   <div class="config-field">
-                    <label>Diretório de Models</label>
+                    <label>Diret&oacute;rio de Models</label>
                     <input type="text" id="oc-models-dir" class="input" value="" placeholder="Carregando..." />
                   </div>
                   <div class="config-field">
@@ -381,117 +381,255 @@
 
         <!-- AGENT PANEL -->
         <section class="panel" id="panel-agent">
-          <div class="panel-scroll">
-            <div class="section-header">
-              <h2 class="section-title">Agent Control Plane</h2>
-              <p class="section-subtitle">Controle channels, plugins, skills, policies e runtime</p>
-            </div>
-
-            <div class="agent-sections">
-              <!-- Channels -->
-              <div class="agent-section">
-                <div class="agent-section-head">
-                  <h3>
-                    <svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.5">
-                      <path d="M3 5h14v10H3z" /><path d="M7 5V3h6v2" />
-                    </svg>
-                    Channels
-                  </h3>
-                  <button class="add-btn" id="btn-new-channel">+ Novo Channel</button>
-                </div>
-                <div class="channel-cards" id="channel-list">
-                  <div style="padding:16px;text-align:center;color:var(--text-tertiary)">Carregando channels...</div>
+          <div class="agent-workbench">
+            <aside class="agent-sidebar-shell">
+              <div class="agent-sidebar-card agent-sidebar-hero">
+                <span class="agent-sidebar-eyebrow">Agent Console</span>
+                <h2>Orbital Agent</h2>
+                <p>Um workspace com foco em conversa operacional e control plane reunido na aba de configuracao.</p>
+                <div class="agent-sidebar-actions">
+                  <button class="primary-btn" id="btn-new-session">Nova Sessao</button>
+                  <button class="action-btn" id="btn-export-session">Exportar</button>
                 </div>
               </div>
 
-              <!-- Plugins -->
-              <div class="agent-section">
-                <div class="agent-section-head">
-                  <h3>
-                    <svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.5">
-                      <rect x="3" y="3" width="14" height="14" rx="2" /><path d="M7 3v14M3 7h14" />
-                    </svg>
-                    Plugins
-                  </h3>
+              <div class="agent-sidebar-card">
+                <div class="agent-sidebar-head">
+                  <h3>Sessoes</h3>
+                  <span class="agent-meta-pill" id="agent-session-count">0</span>
                 </div>
-                <div class="plugin-list" id="plugin-list">
-                  <div style="padding:16px;text-align:center;color:var(--text-tertiary)">Carregando plugins...</div>
+                <div class="agent-session-list" id="agent-session-list">
+                  <div class="agent-empty-copy">Carregando sessoes...</div>
                 </div>
               </div>
 
-              <!-- Tools & Policies -->
-              <div class="agent-section">
-                <div class="agent-section-head">
-                  <h3>
-                    <svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.5">
-                      <path d="M10 2v4m0 8v4M2 10h4m8 0h4" /><circle cx="10" cy="10" r="3" />
-                    </svg>
-                    Tools &amp; Policies
-                  </h3>
+              <div class="agent-sidebar-card">
+                <div class="agent-sidebar-head">
+                  <h3>Runtime</h3>
+                  <span class="agent-meta-pill status-offline" id="agent-daemon-status">Offline</span>
                 </div>
-                <div class="policy-grid">
-                  <div class="policy-card">
-                    <h4>Execution Mode</h4>
-                    <div class="radio-cards compact">
-                      <label class="radio-card selected"><input type="radio" name="exec" value="full" checked /><div class="radio-card-body"><span class="radio-card-name">Full</span></div></label>
-                      <label class="radio-card"><input type="radio" name="exec" value="read-only" /><div class="radio-card-body"><span class="radio-card-name">Read-only</span></div></label>
-                      <label class="radio-card"><input type="radio" name="exec" value="dry-run" /><div class="radio-card-body"><span class="radio-card-name">Dry-run</span></div></label>
+                <div class="agent-runtime-pills">
+                  <span class="agent-runtime-pill" id="agent-provider-pill">Provider -</span>
+                  <span class="agent-runtime-pill" id="agent-model-pill">Model -</span>
+                  <span class="agent-runtime-pill" id="agent-exec-pill">Exec -</span>
+                  <span class="agent-runtime-pill" id="agent-approval-pill">Approval -</span>
+                </div>
+              </div>
+            </aside>
+
+            <div class="agent-shell">
+              <div class="agent-shell-top">
+                <div class="agent-shell-copy">
+                  <span class="agent-shell-eyebrow">Codex-style Workspace</span>
+                  <h2 class="section-title">Agent Workspace</h2>
+                  <p class="section-subtitle">Chat em primeiro plano, resumo operacional ao lado e todo o control plane em Config.</p>
+                </div>
+
+                <div class="agent-view-switch" role="tablist" aria-label="Agent view">
+                  <button class="agent-view-tab active" data-agent-view="workspace" role="tab" aria-selected="true">Workspace</button>
+                  <button class="agent-view-tab" data-agent-view="config" role="tab" aria-selected="false">Config</button>
+                </div>
+              </div>
+
+              <div class="agent-view active" id="agent-view-workspace">
+                <div class="agent-workspace-grid">
+                  <div class="agent-conversation-shell">
+                    <div class="agent-summary-strip">
+                      <article class="agent-summary-card">
+                        <span class="agent-summary-label">Sessao atual</span>
+                        <strong id="agent-current-session">Nenhuma sessao ativa</strong>
+                        <span id="agent-current-session-meta">Crie uma sessao ou use uma existente no sidebar.</span>
+                      </article>
+                      <article class="agent-summary-card">
+                        <span class="agent-summary-label">Modelo</span>
+                        <strong id="agent-current-model">Nenhum modelo selecionado</strong>
+                        <span id="agent-current-provider">Provider aguardando handshake</span>
+                      </article>
+                      <article class="agent-summary-card">
+                        <span class="agent-summary-label">Politica</span>
+                        <strong id="agent-current-execution">Exec full</strong>
+                        <span id="agent-current-approval">Approval ask</span>
+                      </article>
+                    </div>
+
+                    <div class="agent-prompt-grid">
+                      <button class="agent-prompt-card" type="button" data-agent-prompt="Revise a configuracao atual do agent e sugira ajustes de runtime.">
+                        <span class="agent-prompt-kicker">Config</span>
+                        <span class="agent-prompt-title">Revisar runtime e politicas</span>
+                      </button>
+                      <button class="agent-prompt-card" type="button" data-agent-prompt="Liste os channels e diga quais precisam de acao imediata.">
+                        <span class="agent-prompt-kicker">Channels</span>
+                        <span class="agent-prompt-title">Auditar integracoes ativas</span>
+                      </button>
+                      <button class="agent-prompt-card" type="button" data-agent-prompt="Investigue os ultimos eventos de auditoria e resuma riscos operacionais.">
+                        <span class="agent-prompt-kicker">Audit</span>
+                        <span class="agent-prompt-title">Resumir riscos recentes</span>
+                      </button>
+                    </div>
+
+                    <div class="agent-conversation-card">
+                      <div class="agent-chat-messages" id="agent-chat-messages">
+                        <div class="agent-chat-empty">
+                          <div class="agent-chat-empty-icon">
+                            <svg viewBox="0 0 48 48" width="32" height="32" fill="none" stroke="currentColor" stroke-width="1.5">
+                              <rect x="8" y="8" width="32" height="24" rx="8" />
+                              <path d="M16 18h16M16 24h10M20 32l-4 8" />
+                            </svg>
+                          </div>
+                          <h3>Converse com o Agent</h3>
+                          <p>Use o workspace para operar o runtime, validar canais e executar tarefas guiadas pelo provider selecionado.</p>
+                        </div>
+                      </div>
+
+                      <div class="agent-composer">
+                        <textarea id="agent-command-input" class="agent-command-input" rows="1" placeholder="Pergunte algo ao agente, ou peca uma acao operacional..."></textarea>
+                        <div class="agent-composer-footer">
+                          <div class="agent-composer-meta">
+                            <span id="agent-composer-provider">Provider: -</span>
+                            <span id="agent-composer-model">Model: -</span>
+                            <span id="agent-composer-policy">Exec/Approval: -</span>
+                          </div>
+                          <button class="send-btn" id="agent-send-btn" title="Executar no agente">
+                            <svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+                              <path d="M4 10l12-6-4 16-3-6z" />
+                              <path d="M4 10h8" />
+                            </svg>
+                          </button>
+                        </div>
+                      </div>
                     </div>
                   </div>
-                  <div class="policy-card">
-                    <h4>Approval Mode</h4>
-                    <div class="radio-cards compact">
-                      <label class="radio-card"><input type="radio" name="approval" value="auto" /><div class="radio-card-body"><span class="radio-card-name">Auto</span></div></label>
-                      <label class="radio-card selected"><input type="radio" name="approval" value="ask" checked /><div class="radio-card-body"><span class="radio-card-name">Ask</span></div></label>
-                      <label class="radio-card"><input type="radio" name="approval" value="deny" /><div class="radio-card-body"><span class="radio-card-name">Deny</span></div></label>
+
+                  <aside class="agent-inspector">
+                    <div class="agent-inspector-card">
+                      <div class="agent-sidebar-head">
+                        <h3>Visao rapida</h3>
+                        <span class="agent-meta-pill">Live</span>
+                      </div>
+                      <div class="agent-stat-list">
+                        <div class="agent-stat-item"><span>Channels</span><strong id="agent-channel-count">0</strong></div>
+                        <div class="agent-stat-item"><span>Plugins</span><strong id="agent-plugin-count">0</strong></div>
+                        <div class="agent-stat-item"><span>Skills</span><strong id="agent-skill-count">0</strong></div>
+                        <div class="agent-stat-item"><span>Tools</span><strong id="agent-tool-count">0</strong></div>
+                        <div class="agent-stat-item"><span>Audit</span><strong id="agent-audit-count">0</strong></div>
+                      </div>
                     </div>
-                  </div>
-                  <div class="policy-card full-width">
-                    <h4>Tools Disponíveis</h4>
-                    <div class="tools-grid" id="tools-grid">
-                      <div style="color:var(--text-tertiary);font-size:12px">Carregando...</div>
+
+                    <div class="agent-inspector-card">
+                      <div class="agent-sidebar-head">
+                        <h3>Operacao guiada</h3>
+                        <span class="agent-meta-pill">Checklist</span>
+                      </div>
+                      <ul class="agent-checklist">
+                        <li>Valide o provider e o modelo antes de rodar a sessao.</li>
+                        <li>Use Config para ajustar politicas, plugins, skills e channels.</li>
+                        <li>Revise a auditoria apos a execucao para confirmar o efeito.</li>
+                      </ul>
                     </div>
-                  </div>
+                  </aside>
                 </div>
               </div>
 
-              <!-- Observability -->
-              <div class="agent-section">
-                <div class="agent-section-head">
-                  <h3>
-                    <svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.5">
-                      <path d="M2 16l4-4 3 3 4-6 5 5" /><circle cx="17" cy="3" r="2" />
-                    </svg>
-                    Observabilidade
-                  </h3>
-                  <div class="filter-row">
-                    <button class="action-btn" id="refresh-audit">Atualizar</button>
+              <div class="agent-view" id="agent-view-config" style="display:none;">
+                <div class="agent-config-grid">
+                  <div class="agent-section agent-section-span">
+                    <div class="agent-section-head">
+                      <h3>
+                        <svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.5">
+                          <path d="M10 2v4m0 8v4M2 10h4m8 0h4" />
+                          <circle cx="10" cy="10" r="3" />
+                        </svg>
+                        Tools &amp; Policies
+                      </h3>
+                    </div>
+                    <div class="policy-grid">
+                      <div class="policy-card">
+                        <h4>Execution Mode</h4>
+                        <div class="radio-cards compact">
+                          <label class="radio-card selected"><input type="radio" name="exec" value="full" checked /><div class="radio-card-body"><span class="radio-card-name">Full</span></div></label>
+                          <label class="radio-card"><input type="radio" name="exec" value="read-only" /><div class="radio-card-body"><span class="radio-card-name">Read-only</span></div></label>
+                          <label class="radio-card"><input type="radio" name="exec" value="dry-run" /><div class="radio-card-body"><span class="radio-card-name">Dry-run</span></div></label>
+                        </div>
+                      </div>
+                      <div class="policy-card">
+                        <h4>Approval Mode</h4>
+                        <div class="radio-cards compact">
+                          <label class="radio-card"><input type="radio" name="approval" value="auto" /><div class="radio-card-body"><span class="radio-card-name">Auto</span></div></label>
+                          <label class="radio-card selected"><input type="radio" name="approval" value="ask" checked /><div class="radio-card-body"><span class="radio-card-name">Ask</span></div></label>
+                          <label class="radio-card"><input type="radio" name="approval" value="deny" /><div class="radio-card-body"><span class="radio-card-name">Deny</span></div></label>
+                        </div>
+                      </div>
+                      <div class="policy-card full-width">
+                        <h4>Tools Disponiveis</h4>
+                        <div class="tools-grid" id="tools-grid">
+                          <div style="color:var(--text-tertiary);font-size:12px">Carregando...</div>
+                        </div>
+                      </div>
+                    </div>
                   </div>
-                </div>
-                <div class="audit-feed" id="audit-feed">
-                  <div style="padding:16px;text-align:center;color:var(--text-tertiary)">Carregando auditoria...</div>
-                </div>
-              </div>
 
-              <!-- Agent Chat -->
-              <div class="agent-section">
-                <div class="agent-section-head">
-                  <h3>
-                    <svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.5">
-                      <path d="M3 4h14v9H7l-4 3V4z" />
-                    </svg>
-                    Agent Chat
-                  </h3>
-                  <div class="session-controls">
-                    <button class="action-btn" id="btn-new-session">Nova Sessão</button>
-                    <button class="action-btn" id="btn-export-session">Exportar</button>
+                  <div class="agent-section">
+                    <div class="agent-section-head">
+                      <h3>
+                        <svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.5">
+                          <path d="M4 10h12M10 4v12" />
+                          <circle cx="10" cy="10" r="7" />
+                        </svg>
+                        Skills
+                      </h3>
+                    </div>
+                    <div class="skills-cloud" id="skills-list">
+                      <div class="agent-empty-copy">Carregando skills...</div>
+                    </div>
                   </div>
-                </div>
-                <div class="agent-chat-box">
-                  <div class="agent-chat-messages">
-                  <div class="oc-input">
-                    <input type="text" placeholder="Comando para o agente..." />
-                    <button class="send-btn small">Executar</button>
+
+                  <div class="agent-section">
+                    <div class="agent-section-head">
+                      <h3>
+                        <svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.5">
+                          <rect x="3" y="3" width="14" height="14" rx="2" />
+                          <path d="M7 3v14M3 7h14" />
+                        </svg>
+                        Plugins
+                      </h3>
+                    </div>
+                    <div class="plugin-list" id="plugin-list">
+                      <div style="padding:16px;text-align:center;color:var(--text-tertiary)">Carregando plugins...</div>
+                    </div>
+                  </div>
+
+                  <div class="agent-section">
+                    <div class="agent-section-head">
+                      <h3>
+                        <svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.5">
+                          <path d="M3 5h14v10H3z" />
+                          <path d="M7 5V3h6v2" />
+                        </svg>
+                        Channels
+                      </h3>
+                      <button class="add-btn" id="btn-new-channel">+ Novo Channel</button>
+                    </div>
+                    <div class="channel-cards" id="channel-list">
+                      <div style="padding:16px;text-align:center;color:var(--text-tertiary)">Carregando channels...</div>
+                    </div>
+                  </div>
+
+                  <div class="agent-section agent-section-span">
+                    <div class="agent-section-head">
+                      <h3>
+                        <svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.5">
+                          <path d="M2 16l4-4 3 3 4-6 5 5" />
+                          <circle cx="17" cy="3" r="2" />
+                        </svg>
+                        Observabilidade
+                      </h3>
+                      <div class="filter-row">
+                        <button class="action-btn" id="refresh-audit">Atualizar</button>
+                      </div>
+                    </div>
+                    <div class="audit-feed" id="audit-feed">
+                      <div style="padding:16px;text-align:center;color:var(--text-tertiary)">Carregando auditoria...</div>
+                    </div>
                   </div>
                 </div>
               </div>
