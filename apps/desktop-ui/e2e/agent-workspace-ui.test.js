@@ -416,3 +416,52 @@ test("workspace hides OpenClaw when unavailable and preserves cached model shell
     fixture.cleanup();
   }
 });
+
+test("sidebar global aparece apenas no chat e some nas outras abas", async () => {
+  const fixture = createFixture();
+
+  try {
+    await flush();
+
+    assert.equal(fixture.document.getElementById("app")?.classList.contains("chat-sidebar-visible"), true);
+
+    fixture.document.querySelector('.tab[data-panel="agent"]')?.click();
+    await flush(2);
+    assert.equal(fixture.document.getElementById("app")?.classList.contains("chat-sidebar-visible"), false);
+
+    fixture.document.querySelector('.tab[data-panel="chat"]')?.click();
+    await flush(2);
+    assert.equal(fixture.document.getElementById("app")?.classList.contains("chat-sidebar-visible"), true);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("chat canoniza modelos legados decorados antes de chamar o backend", async () => {
+  const fixture = createFixture({
+    modelsResponse: [
+      {
+        id: "ollama::dolphin3:8b",
+        name: "dolphin3:8b [Ollama]",
+        provider: "ollama",
+        is_available: true,
+      },
+    ],
+    cachedCurrentModel: "dolphin3:8b [Ollama]",
+  });
+
+  try {
+    await flush();
+
+    const input = fixture.document.getElementById("chat-input");
+    input.value = "Mostre o estado do runtime";
+    fixture.document.getElementById("send-btn")?.click();
+    await flush(6);
+
+    const streamCall = fixture.fetchCalls.find((entry) => entry.path === "/chat/stream");
+    assert.ok(streamCall);
+    assert.equal(streamCall.body.model_id, "ollama::dolphin3:8b");
+  } finally {
+    fixture.cleanup();
+  }
+});

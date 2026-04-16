@@ -207,10 +207,13 @@ code { font-family: var(--font-mono); }
   position: relative;
   z-index: 1;
   display: grid;
-  grid-template-columns: var(--sidebar-width) 1fr;
+  grid-template-columns: 1fr;
   height: 100vh;
   opacity: 1;
   transition: opacity 0.6s var(--ease-out);
+}
+.app.chat-sidebar-visible {
+  grid-template-columns: var(--sidebar-width) 1fr;
 }
 .app.hidden {
   opacity: 0;
@@ -220,12 +223,15 @@ code { font-family: var(--font-mono); }
 .sidebar {
   background: var(--bg-base);
   border-right: 1px solid var(--border);
-  display: flex;
+  display: none;
   flex-direction: column;
   padding: 0;
   overflow: hidden;
   position: relative;
   z-index: 10;
+}
+.app.chat-sidebar-visible .sidebar {
+  display: flex;
 }
 .sidebar::after {
   content: '';
@@ -394,9 +400,27 @@ code { font-family: var(--font-mono); }
   gap: 16px;
 }
 
+.topbar-left {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  min-width: 0;
+}
+
+.topbar-brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-shrink: 0;
+  padding-right: 18px;
+  border-right: 1px solid rgba(255, 255, 255, 0.08);
+}
+
 .tab-bar {
   display: flex;
   gap: 2px;
+  min-width: 0;
+  overflow-x: auto;
 }
 .tab {
   display: flex;
@@ -442,6 +466,10 @@ code { font-family: var(--font-mono); }
   align-items: center;
   gap: 12px;
   flex-shrink: 0;
+}
+
+.hidden-metric {
+  display: none !important;
 }
 
 /* Model Picker */
@@ -706,6 +734,9 @@ code { font-family: var(--font-mono); }
   white-space: pre-wrap;
   line-height: 1.6;
   user-select: text;
+}
+.thinking-content.markdown-body {
+  white-space: normal;
 }
 
 /* Markdown body styling */
@@ -1573,9 +1604,6 @@ code { font-family: var(--font-mono); }
 
 .agent-workbench {
   height: 100%;
-  display: grid;
-  grid-template-columns: 320px minmax(0, 1fr);
-  gap: 24px;
   padding: 24px;
 }
 
@@ -1704,11 +1732,14 @@ code { font-family: var(--font-mono); }
 }
 
 .agent-session-list {
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(220px, 260px);
   gap: 8px;
-  overflow-y: auto;
-  max-height: 260px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  max-height: none;
+  padding-bottom: 4px;
 }
 
 .agent-session-item {
@@ -1774,9 +1805,16 @@ code { font-family: var(--font-mono); }
   gap: 8px;
 }
 
+.agent-runtime-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .agent-shell {
   display: flex;
   flex-direction: column;
+  height: 100%;
   overflow: hidden;
   border-radius: 28px;
   border: 1px solid rgba(255, 255, 255, 0.08);
@@ -1789,11 +1827,25 @@ code { font-family: var(--font-mono); }
 
 .agent-shell-top {
   display: flex;
-  align-items: flex-start;
+  align-items: flex-end;
   justify-content: space-between;
   gap: 20px;
   padding: 24px 24px 18px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.agent-shell-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.agent-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
 }
 
 .agent-shell-copy .section-title {
@@ -1840,9 +1892,7 @@ code { font-family: var(--font-mono); }
 
 .agent-workspace-grid {
   height: 100%;
-  display: grid;
-  grid-template-columns: minmax(0, 1.4fr) 320px;
-  gap: 20px;
+  display: block;
 }
 
 .agent-conversation-shell {
@@ -1853,7 +1903,7 @@ code { font-family: var(--font-mono); }
 
 .agent-summary-strip {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 14px;
 }
 
@@ -1877,6 +1927,43 @@ code { font-family: var(--font-mono); }
 .agent-summary-card span:last-child {
   font-size: 12px;
   color: var(--text-secondary);
+}
+
+.agent-summary-metrics {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 12px;
+}
+
+.agent-summary-metrics span {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.agent-summary-metrics strong {
+  font-family: var(--font-heading);
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.agent-session-strip {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 18px;
+  border-radius: 22px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.agent-strip-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .agent-prompt-grid {
@@ -2656,24 +2743,26 @@ code { font-family: var(--font-mono); }
   .sidebar {
     display: none;
   }
+  .app.chat-sidebar-visible {
+    grid-template-columns: 1fr;
+  }
   .tab {
     padding: 6px 10px;
     font-size: 12px;
   }
   .tab-icon { display: none; }
   .agent-workbench {
-    grid-template-columns: 1fr;
     padding: 20px;
   }
   .agent-session-list {
-    max-height: none;
+    grid-auto-columns: minmax(200px, 1fr);
   }
   .agent-shell-top {
     flex-direction: column;
     align-items: stretch;
   }
-  .agent-view-switch {
-    align-self: flex-start;
+  .agent-shell-actions {
+    justify-content: flex-start;
   }
   .agent-workspace-grid,
   .agent-config-grid {
@@ -2687,13 +2776,22 @@ code { font-family: var(--font-mono); }
     padding: 10px 12px;
     gap: 8px;
   }
+  .topbar-left {
+    width: 100%;
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+  .topbar-brand {
+    padding-right: 0;
+    border-right: 0;
+  }
   .tab-bar {
     overflow-x: auto;
     width: 100%;
-    order: 2;
   }
   .topbar-right {
-    order: 1;
+    width: 100%;
+    justify-content: space-between;
   }
   .panel-scroll {
     padding: 20px 16px;
@@ -2734,17 +2832,22 @@ code { font-family: var(--font-mono); }
     padding: 18px;
   }
   .agent-summary-strip,
+  .agent-summary-metrics,
   .agent-prompt-grid,
   .agent-config-grid,
   .policy-grid {
     grid-template-columns: 1fr;
   }
   .agent-sidebar-actions,
+  .agent-header-actions,
   .agent-composer-footer,
   .radio-cards,
   .radio-cards.compact {
     flex-direction: column;
     align-items: stretch;
+  }
+  .agent-session-list {
+    grid-auto-columns: minmax(220px, 1fr);
   }
   .agent-composer .send-btn {
     align-self: flex-end;

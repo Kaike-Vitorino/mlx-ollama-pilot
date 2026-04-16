@@ -68,6 +68,63 @@
     openclawInstalled: false,
   };
 
+  function stripModelDecoration(value) {
+    return String(value || '')
+      .trim()
+      .replace(/\s+\[(Ollama|MLX|llama\.cpp)\]$/i, '')
+      .trim();
+  }
+
+  function humanizeModelLabel(value) {
+    return stripModelDecoration(value).replace(/^(ollama|mlx|llama)::/i, '').trim();
+  }
+
+  function providerPrefix(provider) {
+    const normalized = String(provider || '').trim().toLowerCase();
+    if (normalized.includes('ollama')) return 'ollama::';
+    if (normalized === 'mlx' || normalized.includes('mlx')) return 'mlx::';
+    if (normalized.includes('llama')) return 'llama::';
+    return '';
+  }
+
+  function inferModelProvider(modelId, fallback = '') {
+    const raw = String(modelId || '').trim().toLowerCase();
+    const fallbackPrefix = providerPrefix(fallback);
+    if (raw.startsWith('ollama::') || fallbackPrefix === 'ollama::') return 'ollama';
+    if (raw.startsWith('mlx::') || fallbackPrefix === 'mlx::') return 'mlx';
+    if (raw.startsWith('llama::') || fallbackPrefix === 'llama::') return 'llamacpp';
+    return fallback || state.agentConfig?.provider || state.provider || 'configured';
+  }
+
+  function resolveModelId(candidate, provider = '') {
+    const raw = stripModelDecoration(candidate);
+    if (!raw) return '';
+
+    const exact = state.models.find(model =>
+      model.id === raw
+      || model.name === raw
+      || stripModelDecoration(model.id) === raw
+      || stripModelDecoration(model.name) === raw
+    );
+    if (exact) return exact.id;
+
+    if (!raw.includes('::')) {
+      const suffixMatch = state.models.find(model => model.id.endsWith(`::${raw}`));
+      if (suffixMatch) return suffixMatch.id;
+    }
+
+    const prefix = providerPrefix(provider);
+    if (prefix && !raw.startsWith(prefix) && !raw.includes('::') && !raw.includes('/') && !raw.includes('\\')) {
+      return `${prefix}${raw}`;
+    }
+
+    return raw;
+  }
+
+  function activeModelId() {
+    return resolveModelId(state.currentModel || state.agentConfig?.model_id || '', state.agentConfig?.provider);
+  }
+
   // -- API ----------------------------------------------------
   async function api(path, opts = {}) {
     const url = (state.daemonUrl || DEFAULT_DAEMON_URL) + path;
@@ -158,11 +215,18 @@
     dot.classList.toggle('offline', !online);
   }
 
+  function syncShellLayout(target) {
+    if (!appEl) return;
+    appEl.dataset.activePanel = target;
+    appEl.classList.toggle('chat-sidebar-visible', target === 'chat');
+  }
+
   function saveModelCache() {
     try {
       localStorage.setItem(MODEL_CACHE_KEY, JSON.stringify(state.models));
-      if (state.currentModel) {
-        localStorage.setItem(CURRENT_MODEL_KEY, state.currentModel);
+      const resolvedModel = activeModelId();
+      if (resolvedModel) {
+        localStorage.setItem(CURRENT_MODEL_KEY, resolvedModel);
       }
     } catch {
       /* ignore storage errors */
@@ -170,8 +234,10 @@
   }
 
   function ensureVisibleModel(modelId, provider) {
-    const normalizedId = (modelId || '').trim();
+    const normalizedId = resolveModelId(modelId, provider);
     if (!normalizedId) return;
+
+    const displayName = humanizeModelLabel(modelId) || normalizedId;
 
     if (state.models.some(model => model.id === normalizedId)) return;
 
@@ -179,8 +245,8 @@
       ...state.models,
       {
         id: normalizedId,
-        name: normalizedId,
-        provider: provider || state.agentConfig?.provider || state.provider || 'configured',
+        name: displayName,
+        provider: inferModelProvider(normalizedId, provider),
         path: normalizedId,
         is_available: false,
       },
@@ -188,17 +254,18 @@
   }
 
   function hydrateModelShell() {
-    const configuredModel = state.agentConfig?.model_id || state.currentModel;
+    const configuredModel = resolveModelId(state.currentModel || state.agentConfig?.model_id, state.agentConfig?.provider);
     if (configuredModel) {
       ensureVisibleModel(configuredModel, state.agentConfig?.provider);
-      if (!state.currentModel) state.currentModel = configuredModel;
+      if (state.currentModel !== configuredModel) state.currentModel = configuredModel;
     }
 
     renderModelPicker();
-    if (state.currentModel) {
-      const currentLabel = state.models.find(model => model.id === state.currentModel);
+    const currentModelId = activeModelId();
+    if (currentModelId) {
+      const currentLabel = state.models.find(model => model.id === currentModelId);
       const nameEl = document.getElementById('current-model');
-      if (nameEl) nameEl.textContent = currentLabel ? (currentLabel.name || currentLabel.id) : state.currentModel;
+      if (nameEl) nameEl.textContent = currentLabel ? (currentLabel.name || currentLabel.id) : humanizeModelLabel(currentModelId);
     }
     renderInstalledModels();
     updateAgentWorkspaceSummary();
@@ -325,6 +392,7 @@
   }
 
   async function startApp() {
+    syncShellLayout(document.querySelector('.tab.active')?.dataset.panel || 'chat');
     hydrateModelShell();
     await bootSequence();
     revealApp();
@@ -360,9 +428,10 @@
   }
 
   function currentModelLabel() {
-    const selected = state.models.find(m => m.id === state.currentModel);
+    const selectedId = activeModelId();
+    const selected = state.models.find(m => m.id === selectedId);
     if (selected) return selected.name || selected.id;
-    return state.currentModel || state.agentConfig?.model_id || 'Nenhum modelo selecionado';
+    return humanizeModelLabel(selectedId || state.currentModel || state.agentConfig?.model_id || '') || 'Nenhum modelo selecionado';
   }
 
   function currentProviderLabel() {
@@ -393,7 +462,7 @@
           </svg>
         </div>
         <h3>Converse com o Agent</h3>
-        <p>Use o workspace para operar o runtime, validar canais e executar tarefas guiadas pelo provider selecionado.</p>
+        <p>Use o workspace para operar o runtime, revisar sessoes recentes e executar tarefas guiadas pelo provider selecionado.</p>
       </div>`;
   }
 
@@ -423,7 +492,7 @@
     setText('agent-exec-pill', `Exec ${execMode}`);
     setText('agent-approval-pill', `Approval ${approvalMode}`);
     setText('agent-current-session', currentSession ? (currentSession.name || `Sessao ${currentSession.id?.substring(0, 6) || '?'}`) : 'Nenhuma sessao ativa');
-    setText('agent-current-session-meta', currentSession ? `${currentSession.message_count || 0} msg${(currentSession.message_count || 0) === 1 ? '' : 's'} nesta sessao` : 'Crie uma sessao ou use uma existente no sidebar.');
+    setText('agent-current-session-meta', currentSession ? `${currentSession.message_count || 0} msg${(currentSession.message_count || 0) === 1 ? '' : 's'} nesta sessao` : 'Crie uma sessao ou use uma existente na faixa acima.');
     setText('agent-current-model', modelLabel);
     setText('agent-current-provider', `Provider ${providerLabel}`);
     setText('agent-current-execution', `Exec ${execMode}`);
@@ -533,9 +602,10 @@
     try {
       const config = await api('/agent/config');
       state.agentConfig = config;
-      if (config?.model_id) {
-        ensureVisibleModel(config.model_id, config.provider);
-        if (!state.currentModel) state.currentModel = config.model_id;
+      const configuredModel = resolveModelId(config?.model_id, config?.provider);
+      if (configuredModel) {
+        ensureVisibleModel(configuredModel, config.provider);
+        if (!state.currentModel) state.currentModel = configuredModel;
       }
       populateAgentPolicy(config);
       hydrateModelShell();
@@ -595,6 +665,7 @@
         const models = await api('/models');
         state.models = Array.isArray(models) ? models : [];
         if (state.agentConfig?.model_id) ensureVisibleModel(state.agentConfig.model_id, state.agentConfig.provider);
+        if (state.currentModel) state.currentModel = resolveModelId(state.currentModel, state.agentConfig?.provider);
         if (state.currentModel) ensureVisibleModel(state.currentModel, state.agentConfig?.provider);
         state.modelsLoaded = true;
         state.modelsStale = false;
@@ -658,15 +729,16 @@
   }
 
   function selectModel(id) {
-    state.currentModel = id;
+    const resolvedId = resolveModelId(id, state.agentConfig?.provider);
+    state.currentModel = resolvedId || id;
     try {
-      localStorage.setItem(CURRENT_MODEL_KEY, id);
+      localStorage.setItem(CURRENT_MODEL_KEY, state.currentModel);
     } catch {
       /* ignore storage errors */
     }
     const nameEl = document.getElementById('current-model');
-    const model = state.models.find(m => m.id === id);
-    if (nameEl) nameEl.textContent = model ? (model.name || model.id) : id;
+    const model = state.models.find(m => m.id === state.currentModel);
+    if (nameEl) nameEl.textContent = model ? (model.name || model.id) : humanizeModelLabel(state.currentModel);
     renderModelPicker();
     updateAgentWorkspaceSummary();
   }
@@ -780,7 +852,8 @@
   // -- Chat Streaming -----------------------------------------
   async function sendChatMessage(text) {
     if (!text.trim() || state.isStreaming) return;
-    if (!state.currentModel) { addSystemMsg('Selecione um modelo primeiro.'); return; }
+    const modelId = activeModelId();
+    if (!modelId) { addSystemMsg('Selecione um modelo primeiro.'); return; }
 
     addMessage('user', text);
     const input = document.getElementById('chat-input');
@@ -797,7 +870,7 @@
     state.streamController = new AbortController();
 
     const payload = {
-      model_id: state.currentModel,
+      model_id: modelId,
       messages: state.messages,
       options: { temperature: 0.2, airllm_enabled: state.airllmEnabled },
     };
@@ -930,7 +1003,7 @@
       toggle.innerHTML = '<span class="thinking-chevron">&#9662;</span><span class="thinking-label">Pensando</span>';
       block = document.createElement('div');
       block.className = 'msg-thinking';
-      block.innerHTML = `<div class="thinking-content"></div>`;
+      block.innerHTML = `<div class="thinking-content markdown-body"></div>`;
       toggle.addEventListener('click', () => {
         const collapsed = toggle.classList.toggle('collapsed');
         block.style.display = collapsed ? 'none' : 'block';
@@ -938,7 +1011,7 @@
       body.insertBefore(block, body.firstChild);
       body.insertBefore(toggle, block);
     }
-    block.querySelector('.thinking-content').textContent = normalized;
+    block.querySelector('.thinking-content').innerHTML = renderMarkdown(normalized);
   }
 
   function updateAnswer(el, text) {
@@ -1535,6 +1608,7 @@
     const panel = document.getElementById(`panel-${target}`);
     if (tab) { tab.classList.add('active'); tab.setAttribute('aria-selected', 'true'); }
     if (panel) panel.classList.add('active');
+    syncShellLayout(target);
 
     if (target === 'discover') {
       searchCatalog('llama');
@@ -1695,11 +1769,13 @@
     box.scrollTop = box.scrollHeight;
 
     try {
+      const modelId = activeModelId();
+      if (!modelId) throw new Error('Selecione um modelo valido antes de executar o agent.');
       const payload = {
         session_id: state.currentSessionId,
         message: msg,
         provider: state.agentConfig?.provider || 'ollama',
-        model_id: state.currentModel || state.agentConfig?.model_id || '',
+        model_id: modelId,
         execution_mode: state.agentConfig?.execution_mode || 'full',
         approval_mode: state.agentConfig?.approval_mode || 'ask',
         max_iterations: 25,
@@ -1763,6 +1839,8 @@
     createNewSession();
     switchTab('chat');
   });
+
+  document.getElementById('topbar-brand')?.addEventListener('click', () => switchTab('chat'));
 
   // -- Daemon URL ---------------------------------------------
   document.getElementById('save-url')?.addEventListener('click', () => {
@@ -1924,12 +2002,13 @@
     resultEl.innerHTML = '<div class="thinking-indicator"><span>Renderizando</span><span class="dots"><span>.</span><span>.</span><span>.</span></span></div>';
 
     // Send to daemon chat for scene description
-    if (state.currentModel) {
+    const modelId = activeModelId();
+    if (modelId) {
       try {
         const msgs = [{ role: 'user', content: prompt }];
         const res = await api('/chat', {
           method: 'POST',
-          body: JSON.stringify({ model_id: state.currentModel, messages: msgs, options: { temperature: 0.7 } }),
+          body: JSON.stringify({ model_id: modelId, messages: msgs, options: { temperature: 0.7 } }),
         });
         const content = res?.message?.content || 'Sem resposta.';
         resultEl.innerHTML = renderMarkdown(content);
