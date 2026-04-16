@@ -6,7 +6,7 @@
 (function () {
   'use strict';
 
-  // ── State ──────────────────────────────────────────────────
+  // -- State --------------------------------------------------
   const state = {
     daemonUrl: localStorage.getItem('mlxPilotDaemonUrl') || 'http://127.0.0.1:11435',
     models: [],
@@ -38,7 +38,7 @@
     activeDiscoverTab: 'catalog',
   };
 
-  // ── API ────────────────────────────────────────────────────
+  // -- API ----------------------------------------------------
   async function api(path, opts = {}) {
     const url = state.daemonUrl + path;
     const res = await fetch(url, {
@@ -59,7 +59,7 @@
     try { return JSON.parse(text); } catch { return { message: text }; }
   }
 
-  // ── Splash ─────────────────────────────────────────────────
+  // -- Splash -------------------------------------------------
   const splash = document.getElementById('splash');
   const appEl = document.getElementById('app');
 
@@ -101,15 +101,112 @@
 
   function updateStatusBadge(online) {
     const badge = document.getElementById('status-badge');
-    if (!badge) return;
-    badge.innerHTML = online
-      ? '<span class="badge-dot online"></span><span>Online</span>'
-      : '<span class="badge-dot offline"></span><span>Offline</span>';
-    badge.style.background = online ? 'var(--green-soft)' : 'var(--rose-soft)';
-    badge.style.color = online ? 'var(--green)' : 'var(--rose)';
+    if (badge) {
+      badge.innerHTML = online
+        ? '<span class="badge-dot online"></span><span>Online</span>'
+        : '<span class="badge-dot offline"></span><span>Offline</span>';
+      badge.style.background = online ? 'var(--green-soft)' : 'var(--rose-soft)';
+      badge.style.color = online ? 'var(--green)' : 'var(--rose)';
+    }
+
+    const runtimeBadge = document.getElementById('agent-daemon-status');
+    if (runtimeBadge) {
+      runtimeBadge.textContent = online ? 'Online' : 'Offline';
+      runtimeBadge.classList.toggle('status-online', online);
+      runtimeBadge.classList.toggle('status-offline', !online);
+    }
+
+    updateAgentWorkspaceSummary();
   }
 
-  // ── Daemon Config (/config) ────────────────────────────────
+  function setText(id, value) {
+    const el = document.getElementById(id);
+    if (el) el.textContent = value;
+  }
+
+  function currentModelLabel() {
+    const selected = state.models.find(m => m.id === state.currentModel);
+    if (selected) return selected.name || selected.id;
+    return state.currentModel || state.agentConfig?.model_id || 'Nenhum modelo selecionado';
+  }
+
+  function currentProviderLabel() {
+    return state.agentConfig?.provider || state.provider || 'auto';
+  }
+
+  function enabledSkillsCount() {
+    return state.skills.filter(skill => skill.active || skill.enabled).length;
+  }
+
+  function enabledToolsCount() {
+    return state.tools.filter(tool => tool.enabled !== false).length;
+  }
+
+  function enabledPluginsCount() {
+    return state.plugins.filter(plugin => plugin.enabled).length;
+  }
+
+  function renderAgentChatEmptyState() {
+    const box = document.getElementById('agent-chat-messages');
+    if (!box) return;
+    box.innerHTML = `
+      <div class="agent-chat-empty">
+        <div class="agent-chat-empty-icon">
+          <svg viewBox="0 0 48 48" width="32" height="32" fill="none" stroke="currentColor" stroke-width="1.5">
+            <rect x="8" y="8" width="32" height="24" rx="8" />
+            <path d="M16 18h16M16 24h10M20 32l-4 8" />
+          </svg>
+        </div>
+        <h3>Converse com o Agent</h3>
+        <p>Use o workspace para operar o runtime, validar canais e executar tarefas guiadas pelo provider selecionado.</p>
+      </div>`;
+  }
+
+  function ensureAgentChatReady() {
+    const box = document.getElementById('agent-chat-messages');
+    if (!box) return null;
+    if (box.querySelector('.agent-chat-empty')) box.innerHTML = '';
+    return box;
+  }
+
+  function resizeTextArea(el, maxHeight = 160) {
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = Math.min(el.scrollHeight, maxHeight) + 'px';
+  }
+
+  function updateAgentWorkspaceSummary() {
+    const currentSession = state.agentSessions.find(session => session.id === state.currentSessionId) || null;
+    const execMode = state.agentConfig?.execution_mode || 'full';
+    const approvalMode = state.agentConfig?.approval_mode || 'ask';
+    const modelLabel = currentModelLabel();
+    const providerLabel = currentProviderLabel();
+
+    setText('agent-session-count', String(state.agentSessions.length));
+    setText('agent-provider-pill', `Provider ${providerLabel}`);
+    setText('agent-model-pill', `Model ${modelLabel}`);
+    setText('agent-exec-pill', `Exec ${execMode}`);
+    setText('agent-approval-pill', `Approval ${approvalMode}`);
+    setText('agent-current-session', currentSession ? (currentSession.name || `Sessao ${currentSession.id?.substring(0, 6) || '?'}`) : 'Nenhuma sessao ativa');
+    setText('agent-current-session-meta', currentSession ? `${currentSession.message_count || 0} msg${(currentSession.message_count || 0) === 1 ? '' : 's'} nesta sessao` : 'Crie uma sessao ou use uma existente no sidebar.');
+    setText('agent-current-model', modelLabel);
+    setText('agent-current-provider', `Provider ${providerLabel}`);
+    setText('agent-current-execution', `Exec ${execMode}`);
+    setText('agent-current-approval', `Approval ${approvalMode}`);
+    setText('agent-composer-provider', `Provider: ${providerLabel}`);
+    setText('agent-composer-model', `Model: ${modelLabel}`);
+    setText('agent-composer-policy', `Exec/Approval: ${execMode} / ${approvalMode}`);
+    setText('agent-channel-count', String(state.channels.length));
+    setText('agent-plugin-count', String(enabledPluginsCount()));
+    setText('agent-skill-count', String(enabledSkillsCount()));
+    setText('agent-tool-count', String(enabledToolsCount()));
+    setText('agent-audit-count', String(state.auditEntries.length));
+
+    const exportBtn = document.getElementById('btn-export-session');
+    if (exportBtn) exportBtn.disabled = !state.currentSessionId;
+  }
+
+  // -- Daemon Config (/config) --------------------------------
   async function loadDaemonConfig() {
     try {
       const config = await api('/config');
@@ -187,12 +284,13 @@
     }
   }
 
-  // ── Agent Config (/agent/config) ───────────────────────────
+  // -- Agent Config (/agent/config) ---------------------------
   async function loadAgentConfig() {
     try {
       const config = await api('/agent/config');
       state.agentConfig = config;
       populateAgentPolicy(config);
+      updateAgentWorkspaceSummary();
     } catch (e) {
       console.error('Agent config load failed:', e);
     }
@@ -222,6 +320,7 @@
       };
       const res = await api('/agent/config', { method: 'POST', body: JSON.stringify(payload) });
       state.agentConfig = res || payload;
+      updateAgentWorkspaceSummary();
       return true;
     } catch (e) {
       console.error('Save agent policy failed:', e);
@@ -234,7 +333,7 @@
     r.addEventListener('change', () => saveAgentPolicy());
   });
 
-  // ── Models ─────────────────────────────────────────────────
+  // -- Models -------------------------------------------------
   async function loadModels({ force = false } = {}) {
     if (state.modelsLoading) return state.modelsPromise;
     if (!force && state.modelsLoaded && !state.modelsStale) return state.models;
@@ -312,6 +411,7 @@
     const model = state.models.find(m => m.id === id);
     if (nameEl) nameEl.textContent = model ? (model.name || model.id) : id;
     renderModelPicker();
+    updateAgentWorkspaceSummary();
   }
 
   function renderInstalledModels() {
@@ -362,7 +462,7 @@
     }));
   }
 
-  // ── Catalog ────────────────────────────────────────────────
+  // -- Catalog ------------------------------------------------
   async function searchCatalog(query) {
     try {
       const models = await api(`/catalog/models?source=huggingface&query=${encodeURIComponent(query)}&limit=20`);
@@ -420,7 +520,7 @@
     container.querySelectorAll('.download-btn').forEach(b => b.addEventListener('click', () => startDownload(b.dataset.src, b.dataset.mid)));
   }
 
-  // ── Chat Streaming ─────────────────────────────────────────
+  // -- Chat Streaming -----------------------------------------
   async function sendChatMessage(text) {
     if (!text.trim() || state.isStreaming) return;
     if (!state.currentModel) { addSystemMsg('Selecione um modelo primeiro.'); return; }
@@ -517,7 +617,7 @@
     state.isStreaming = false;
   }
 
-  // ── Message DOM helpers ────────────────────────────────────
+  // -- Message DOM helpers ------------------------------------
   function addMessage(role, content) {
     const container = document.getElementById('chat-messages');
     if (!container) return null;
@@ -589,34 +689,56 @@
     body.appendChild(div);
   }
 
-  // ── Sessions (sidebar history) ─────────────────────────────
+  // -- Sessions (sidebar history) -----------------------------
   async function loadSessions() {
     try {
       const sessions = await api('/agent/sessions');
       state.agentSessions = Array.isArray(sessions) ? sessions : [];
+      if (state.currentSessionId && !state.agentSessions.some(session => session.id === state.currentSessionId)) state.currentSessionId = null;
+      if (!state.currentSessionId && state.agentSessions[0]?.id) state.currentSessionId = state.agentSessions[0].id;
       renderSidebarHistory();
     } catch {
       state.agentSessions = [];
+      state.currentSessionId = null;
       renderSidebarHistory();
     }
   }
 
   function renderSidebarHistory() {
-    const container = document.getElementById('chat-history');
+    renderSessionCollection(document.getElementById('chat-history'), 'sidebar');
+    renderSessionCollection(document.getElementById('agent-session-list'), 'agent');
+    updateAgentWorkspaceSummary();
+  }
+
+  function renderSessionCollection(container, variant) {
     if (!container) return;
     container.innerHTML = '';
     if (state.agentSessions.length === 0) {
-      container.innerHTML = '<div style="padding:8px 12px;font-size:12px;color:var(--text-tertiary)">Nenhuma sessão ainda</div>';
+      container.innerHTML = variant === 'agent'
+        ? '<div class="agent-empty-copy">Nenhuma sessao ainda</div>'
+        : '<div style="padding:8px 12px;font-size:12px;color:var(--text-tertiary)">Nenhuma sessao ainda</div>';
       return;
     }
     state.agentSessions.forEach(s => {
       const item = document.createElement('div');
-      item.className = 'history-item' + (s.id === state.currentSessionId ? ' active' : '');
-      const name = s.name || `Sessão ${s.id?.substring(0, 6) || '?'}`;
+      const name = s.name || `Sessao ${s.id?.substring(0, 6) || '?'}`;
       const count = s.message_count || 0;
-      item.innerHTML = `<span class="history-icon">&#9679;</span><span class="history-label" title="${esc(name)}">${esc(name)} <span style="opacity:0.5;font-size:11px">(${count})</span></span>`;
+      const active = s.id === state.currentSessionId;
+      if (variant === 'agent') {
+        item.className = 'agent-session-item' + (active ? ' active' : '');
+        item.innerHTML = `
+          <div class="agent-session-title">
+            <span class="agent-session-name" title="${esc(name)}">${esc(name)}</span>
+            <span class="agent-session-count">${fmtNum(count)}</span>
+          </div>
+          <div class="agent-session-meta">${count} msg${count === 1 ? '' : 's'}</div>`;
+      } else {
+        item.className = 'history-item' + (active ? ' active' : '');
+        item.innerHTML = `<span class="history-icon">&#9679;</span><span class="history-label" title="${esc(name)}">${esc(name)} <span style="opacity:0.5;font-size:11px">(${count})</span></span>`;
+      }
       item.addEventListener('click', () => {
         state.currentSessionId = s.id;
+        renderAgentChatEmptyState();
         renderSidebarHistory();
       });
       container.appendChild(item);
@@ -632,11 +754,12 @@
         const msgs = document.getElementById('chat-messages');
         if (msgs) msgs.innerHTML = '';
         await loadSessions();
+        renderAgentChatEmptyState();
       }
     } catch (e) { console.error('New session failed:', e); }
   }
 
-  // ── OpenClaw Runtime ───────────────────────────────────────
+  // -- OpenClaw Runtime ---------------------------------------
   function agentEndpoint(path) {
     const fw = state.openclawFramework;
     return fw === 'nanobot' ? `/nanobot${path}` : `/openclaw${path}`;
@@ -704,7 +827,7 @@
     } catch (e) { return `Erro: ${e.message}`; }
   }
 
-  // ── Plugins ────────────────────────────────────────────────
+  // -- Plugins ------------------------------------------------
   async function loadPlugins() {
     try {
       const plugins = await api('/agent/plugins');
@@ -715,10 +838,14 @@
 
   function renderPlugins() {
     const list = document.getElementById('plugin-list');
-    if (!list) return;
+    if (!list) {
+      updateAgentWorkspaceSummary();
+      return;
+    }
     list.innerHTML = '';
     if (state.plugins.length === 0) {
-      list.innerHTML = '<div style="padding:16px;text-align:center;color:var(--text-tertiary)">Nenhum plugin</div>';
+      list.innerHTML = '<div class="agent-empty-copy">Nenhum plugin</div>';
+      updateAgentWorkspaceSummary();
       return;
     }
     state.plugins.forEach(p => {
@@ -736,13 +863,17 @@
         const enable = !t.classList.contains('active');
         try {
           await api(enable ? '/agent/plugins/enable' : '/agent/plugins/disable', { method: 'POST', body: JSON.stringify({ plugin_id: id }) });
-          t.classList.toggle('active');
+          const plugin = state.plugins.find(entry => (entry.id || entry.plugin_id || entry.name || '?') === id);
+          if (plugin) plugin.enabled = enable;
+          t.classList.toggle('active', enable);
+          updateAgentWorkspaceSummary();
         } catch (e) { alert('Erro: ' + e.message); }
       });
     });
+    updateAgentWorkspaceSummary();
   }
 
-  // ── Skills ─────────────────────────────────────────────────
+  // -- Skills -------------------------------------------------
   async function loadSkills() {
     try {
       const data = await api('/agent/skills/check');
@@ -753,29 +884,36 @@
 
   function renderSkills() {
     const list = document.getElementById('skills-list');
-    if (!list) return;
+    if (!list) {
+      updateAgentWorkspaceSummary();
+      return;
+    }
     list.innerHTML = '';
     if (state.skills.length === 0) {
-      list.innerHTML = '<div style="padding:16px;text-align:center;color:var(--text-tertiary)">Nenhuma skill</div>';
+      list.innerHTML = '<div class="agent-empty-copy">Nenhuma skill</div>';
+      updateAgentWorkspaceSummary();
       return;
     }
     state.skills.forEach(s => {
       const chip = document.createElement('span');
-      chip.className = `skill-chip ${s.active ? 'active' : ''}`;
+      chip.className = `skill-chip ${s.active || s.enabled ? 'active' : ''}`;
       chip.textContent = s.name;
       chip.title = s.description || '';
       chip.addEventListener('click', async () => {
         try {
-          await api(s.active ? '/agent/skills/disable' : '/agent/skills/enable', { method: 'POST', body: JSON.stringify({ skill: s.name }) });
-          s.active = !s.active;
-          chip.classList.toggle('active');
+          await api(s.active || s.enabled ? '/agent/skills/disable' : '/agent/skills/enable', { method: 'POST', body: JSON.stringify({ skill: s.name }) });
+          s.active = !(s.active || s.enabled);
+          s.enabled = s.active;
+          chip.classList.toggle('active', s.active);
+          updateAgentWorkspaceSummary();
         } catch (e) { alert('Erro: ' + e.message); }
       });
       list.appendChild(chip);
     });
+    updateAgentWorkspaceSummary();
   }
 
-  // ── Tools ──────────────────────────────────────────────────
+  // -- Tools --------------------------------------------------
   async function loadTools() {
     try {
       const tools = await api('/agent/tools');
@@ -786,10 +924,14 @@
 
   function renderTools() {
     const grid = document.getElementById('tools-grid');
-    if (!grid) return;
+    if (!grid) {
+      updateAgentWorkspaceSummary();
+      return;
+    }
     grid.innerHTML = '';
     if (state.tools.length === 0) {
       grid.innerHTML = '<span style="color:var(--text-tertiary);font-size:12px">Nenhum tool</span>';
+      updateAgentWorkspaceSummary();
       return;
     }
     state.tools.forEach(t => {
@@ -800,9 +942,10 @@
       chip.style.opacity = t.enabled ? '1' : '0.4';
       grid.appendChild(chip);
     });
+    updateAgentWorkspaceSummary();
   }
 
-  // ── Channels ───────────────────────────────────────────────
+  // -- Channels -----------------------------------------------
   async function loadChannels() {
     try {
       const channels = await api('/agent/channels', { headers: { 'x-channel-protocol-version': 'v1' } });
@@ -813,10 +956,14 @@
 
   function renderChannels() {
     const list = document.getElementById('channel-list');
-    if (!list) return;
+    if (!list) {
+      updateAgentWorkspaceSummary();
+      return;
+    }
     list.innerHTML = '';
     if (state.channels.length === 0) {
       list.innerHTML = '<div style="padding:16px;text-align:center;color:var(--text-tertiary)">Nenhum channel configurado</div>';
+      updateAgentWorkspaceSummary();
       return;
     }
     state.channels.forEach(ch => {
@@ -830,6 +977,7 @@
         });
       }
     });
+    updateAgentWorkspaceSummary();
   }
 
   function makeChannelCard(channelId, account, displayName) {
@@ -859,7 +1007,7 @@
     return card;
   }
 
-  // ── Audit ──────────────────────────────────────────────────
+  // -- Audit --------------------------------------------------
   async function loadAudit() {
     try {
       const data = await api('/agent/audit?limit=30');
@@ -870,10 +1018,14 @@
 
   function renderAuditFeed() {
     const feed = document.getElementById('audit-feed');
-    if (!feed) return;
+    if (!feed) {
+      updateAgentWorkspaceSummary();
+      return;
+    }
     feed.innerHTML = '';
     if (state.auditEntries.length === 0) {
       feed.innerHTML = '<div style="padding:16px;text-align:center;color:var(--text-tertiary)">Nenhum evento</div>';
+      updateAgentWorkspaceSummary();
       return;
     }
     state.auditEntries.forEach(entry => {
@@ -891,9 +1043,10 @@
         </div>`;
       feed.appendChild(item);
     });
+    updateAgentWorkspaceSummary();
   }
 
-  // ── Environment ────────────────────────────────────────────
+  // -- Environment --------------------------------------------
   async function loadEnvironment() {
     try {
       const data = await api('/environment?reveal=false');
@@ -948,7 +1101,7 @@
     } catch (e) { alert('Erro: ' + e.message); }
   }
 
-  // ── Tab Navigation ─────────────────────────────────────────
+  // -- Tab Navigation -----------------------------------------
   function switchTab(target) {
     document.querySelectorAll('.tab').forEach(t => { t.classList.remove('active'); t.setAttribute('aria-selected', 'false'); });
     document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
@@ -962,19 +1115,42 @@
       if (state.activeDiscoverTab === 'installed') showInstalledModels();
     }
     if (target === 'openclaw') { loadRuntimeStatus(); loadOpenClawObservability(); }
+    if (target === 'agent') updateAgentWorkspaceSummary();
     if (target === 'ai-interaction') initAICanvas();
   }
 
   document.querySelectorAll('.tab').forEach(tab => tab.addEventListener('click', () => switchTab(tab.dataset.panel)));
 
-  // ── Model Picker ───────────────────────────────────────────
+  document.querySelectorAll('.agent-view-tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+      document.querySelectorAll('.agent-view-tab').forEach(t => {
+        t.classList.remove('active');
+        t.setAttribute('aria-selected', 'false');
+      });
+      document.querySelectorAll('.agent-view').forEach(view => {
+        view.classList.remove('active');
+        view.style.display = 'none';
+      });
+      tab.classList.add('active');
+      tab.setAttribute('aria-selected', 'true');
+      const view = document.getElementById(`agent-view-${tab.dataset.agentView}`);
+      if (view) {
+        view.classList.add('active');
+        view.style.display = 'block';
+      }
+      if (tab.dataset.agentView === 'config') loadAudit();
+      updateAgentWorkspaceSummary();
+    });
+  });
+
+  // -- Model Picker -------------------------------------------
   document.getElementById('model-trigger')?.addEventListener('click', (e) => {
     e.stopPropagation();
     document.getElementById('model-menu')?.classList.toggle('hidden');
   });
   document.addEventListener('click', () => document.getElementById('model-menu')?.classList.add('hidden'));
 
-  // ── Discover Sub-tabs ──────────────────────────────────────
+  // -- Discover Sub-tabs --------------------------------------
   document.querySelectorAll('.discover-tab').forEach(tab => {
     tab.addEventListener('click', () => {
       document.querySelectorAll('.discover-tab').forEach(t => t.classList.remove('active'));
@@ -993,14 +1169,14 @@
     refreshModelsInBackground();
   });
 
-  // ── Catalog Search ─────────────────────────────────────────
+  // -- Catalog Search -----------------------------------------
   let searchTimeout;
   document.getElementById('catalog-search')?.addEventListener('input', (e) => {
     clearTimeout(searchTimeout);
     searchTimeout = setTimeout(() => { if (e.target.value.trim().length >= 2) searchCatalog(e.target.value.trim()); }, 500);
   });
 
-  // ── OpenClaw Sub-tabs ──────────────────────────────────────
+  // -- OpenClaw Sub-tabs --------------------------------------
   document.querySelectorAll('.oc-tab').forEach(tab => {
     tab.addEventListener('click', async () => {
       document.querySelectorAll('.oc-tab').forEach(t => t.classList.remove('active'));
@@ -1021,7 +1197,7 @@
     loadOpenClawLogs(e.target.value);
   });
 
-  // ── OpenClaw Config Save ───────────────────────────────────
+  // -- OpenClaw Config Save -----------------------------------
   document.getElementById('oc-save-config')?.addEventListener('click', async () => {
     const c = state.daemonConfig || {};
     const get = (id) => document.getElementById(id)?.value;
@@ -1038,7 +1214,7 @@
     } catch (e) { alert('Erro: ' + e.message); }
   });
 
-  // ── OpenClaw Chat ──────────────────────────────────────────
+  // -- OpenClaw Chat ------------------------------------------
   const ocInput = document.querySelector('#oc-chat .oc-input input');
   const ocSendBtn = document.querySelector('#oc-chat .send-btn');
   ocSendBtn?.addEventListener('click', async () => {
@@ -1052,14 +1228,30 @@
   });
   ocInput?.addEventListener('keydown', (e) => { if (e.key === 'Enter') ocSendBtn?.click(); });
 
-  // ── Agent Chat ─────────────────────────────────────────────
-  const agentInput = document.querySelector('#panel-agent .oc-input input');
-  const agentSendBtn = document.querySelector('#panel-agent .send-btn');
+  // -- Agent Chat ---------------------------------------------
+  const agentInput = document.getElementById('agent-command-input');
+  const agentSendBtn = document.getElementById('agent-send-btn');
+
+  document.querySelectorAll('.agent-prompt-card').forEach(card => {
+    card.addEventListener('click', () => {
+      if (!agentInput) return;
+      agentInput.value = card.dataset.agentPrompt || '';
+      resizeTextArea(agentInput, 220);
+      agentInput.focus();
+    });
+  });
+
+  agentInput?.addEventListener('input', () => resizeTextArea(agentInput, 220));
   agentSendBtn?.addEventListener('click', async () => {
     if (!agentInput?.value.trim()) return;
-    const msg = agentInput.value.trim(); agentInput.value = '';
-    const box = document.querySelector('#panel-agent .agent-chat-messages');
-    box.innerHTML += `<div class="message user-message"><div class="msg-avatar">U</div><div class="msg-body"><div class="msg-content">${esc(msg)}</div></div></div>`;
+    const msg = agentInput.value.trim();
+    agentInput.value = '';
+    resizeTextArea(agentInput, 220);
+
+    const box = ensureAgentChatReady();
+    if (!box) return;
+
+    box.insertAdjacentHTML('beforeend', `<div class="message user-message"><div class="msg-avatar">U</div><div class="msg-body"><div class="msg-content">${esc(msg)}</div></div></div>`);
     const agDiv = document.createElement('div');
     agDiv.className = 'message assistant-message';
     agDiv.innerHTML = `<div class="msg-avatar assistant">AG</div><div class="msg-body"><div class="msg-content markdown-body"><div class="thinking-indicator"><span>Processando</span><span class="dots"><span>.</span><span>.</span><span>.</span></span></div></div></div>`;
@@ -1077,23 +1269,31 @@
         max_iterations: 25,
       };
       const res = await api('/agent/run', { method: 'POST', body: JSON.stringify(payload) });
-      if (res?.session_id) { state.currentSessionId = res.session_id; loadSessions(); }
+      if (res?.session_id) {
+        state.currentSessionId = res.session_id;
+        await loadSessions();
+      } else {
+        updateAgentWorkspaceSummary();
+      }
       const content = res?.final_response || 'Sem resposta.';
       agDiv.querySelector('.msg-content').innerHTML = renderMarkdown(content);
-      if (res?.total_tokens) {
-        addMetrics(agDiv, res);
-      }
+      if (res?.total_tokens) addMetrics(agDiv, res);
     } catch (e) {
       agDiv.querySelector('.msg-content').innerHTML = `<span style="color:var(--rose)">Erro: ${esc(e.message)}</span>`;
     }
     box.scrollTop = box.scrollHeight;
   });
-  agentInput?.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); agentSendBtn?.click(); } });
+  agentInput?.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      agentSendBtn?.click();
+    }
+  });
 
-  // ── Audit Refresh ──────────────────────────────────────────
+  // -- Audit Refresh ------------------------------------------
   document.getElementById('refresh-audit')?.addEventListener('click', () => loadAudit());
 
-  // ── Settings Save ──────────────────────────────────────────
+  // -- Settings Save ------------------------------------------
   document.getElementById('save-settings-btn')?.addEventListener('click', async () => {
     const ok = await saveDaemonConfig();
     const btn = document.getElementById('save-settings-btn');
@@ -1109,7 +1309,7 @@
     if (tv) tv.textContent = e.target.value + '%';
   });
 
-  // ── Sidebar: New Chat ──────────────────────────────────────
+  // -- Sidebar: New Chat --------------------------------------
   document.getElementById('btn-new-chat')?.addEventListener('click', () => {
     state.messages = [];
     state.currentSessionId = null;
@@ -1119,7 +1319,7 @@
     switchTab('chat');
   });
 
-  // ── Daemon URL ─────────────────────────────────────────────
+  // -- Daemon URL ---------------------------------------------
   document.getElementById('save-url')?.addEventListener('click', () => {
     const input = document.getElementById('daemon-url');
     if (input?.value.trim()) {
@@ -1131,7 +1331,7 @@
     }
   });
 
-  // ── Toggle Chips ───────────────────────────────────────────
+  // -- Toggle Chips -------------------------------------------
   document.querySelectorAll('.toggle-chip').forEach(chip => {
     chip.addEventListener('click', () => {
       chip.classList.toggle('active');
@@ -1140,13 +1340,13 @@
     });
   });
 
-  // ── Chat Input ─────────────────────────────────────────────
+  // -- Chat Input ---------------------------------------------
   const chatInput = document.getElementById('chat-input');
-  chatInput?.addEventListener('input', () => { chatInput.style.height = 'auto'; chatInput.style.height = Math.min(chatInput.scrollHeight, 160) + 'px'; });
+  chatInput?.addEventListener('input', () => resizeTextArea(chatInput, 160));
   chatInput?.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChatMessage(chatInput.value); } });
   document.getElementById('send-btn')?.addEventListener('click', () => sendChatMessage(chatInput?.value || ''));
 
-  // ── Radio Card generic ─────────────────────────────────────
+  // -- Radio Card generic -------------------------------------
   document.querySelectorAll('.radio-card input[type="radio"]').forEach(radio => {
     radio.addEventListener('change', () => {
       document.querySelectorAll(`input[name="${radio.name}"]`).forEach(r => r.closest('.radio-card')?.classList.remove('selected'));
@@ -1154,7 +1354,7 @@
     });
   });
 
-  // ── Code Copy ──────────────────────────────────────────────
+  // -- Code Copy ----------------------------------------------
   document.addEventListener('click', (e) => {
     const btn = e.target.closest('.code-copy');
     if (!btn) return;
@@ -1162,7 +1362,7 @@
     if (code) { navigator.clipboard.writeText(code.textContent).then(() => { btn.textContent = 'Copiado!'; setTimeout(() => { btn.textContent = 'Copiar'; }, 2000); }); }
   });
 
-  // ── AI Canvas Particles ────────────────────────────────────
+  // -- AI Canvas Particles ------------------------------------
   let aiCanvas, aiCtx, aiAnimFrame, particles = [];
   function initAICanvas() {
     aiCanvas = document.getElementById('ai-canvas');
@@ -1197,7 +1397,7 @@
     aiAnimFrame = requestAnimationFrame(animParticles);
   }
 
-  // ── Atmosphere ─────────────────────────────────────────────
+  // -- Atmosphere ---------------------------------------------
   const atmCanvas = document.getElementById('atmosphere');
   if (atmCanvas) {
     const ctx = atmCanvas.getContext('2d');
@@ -1209,7 +1409,7 @@
     window.addEventListener('resize', () => { resizeA(); mkA(); });
   }
 
-  // ── OpenClaw Runtime Controls ──────────────────────────────
+  // -- OpenClaw Runtime Controls ------------------------------
   async function runtimeAction(action) {
     try {
       const res = await api(agentEndpoint('/runtime'), { method: 'POST', body: JSON.stringify({ action }) });
@@ -1228,16 +1428,16 @@
     loadOpenClawLogs('gateway');
   });
 
-  // ── Agent: New Session / Export ─────────────────────────────
+  // -- Agent: New Session / Export -----------------------------
   document.getElementById('btn-new-session')?.addEventListener('click', async () => {
     try {
       const session = await api('/agent/sessions', { method: 'POST', body: JSON.stringify({ name: '' }) });
       if (session?.id) {
         state.currentSessionId = session.id;
-        state.messages = [];
-        const msgs = document.getElementById('chat-messages');
-        if (msgs) msgs.innerHTML = '';
         await loadSessions();
+        renderAgentChatEmptyState();
+        updateAgentWorkspaceSummary();
+        agentInput?.focus();
       }
     } catch (e) { alert('Erro: ' + e.message); }
   });
@@ -1247,7 +1447,7 @@
     window.open(state.daemonUrl + '/agent/sessions/' + state.currentSessionId + '/export', '_blank');
   });
 
-  // ── Agent: New Channel ─────────────────────────────────────
+  // -- Agent: New Channel -------------------------------------
   document.getElementById('btn-new-channel')?.addEventListener('click', async () => {
     const channelId = prompt('Nome/ID do channel (ex: whatsapp, slack, http):');
     if (!channelId) return;
@@ -1261,7 +1461,7 @@
     } catch (e) { alert('Erro: ' + e.message); }
   });
 
-  // ── AI Visual Panel ────────────────────────────────────────
+  // -- AI Visual Panel ----------------------------------------
   const aiInput = document.getElementById('ai-input');
   const aiSendBtn = document.getElementById('ai-send-btn');
 
@@ -1321,7 +1521,7 @@
   aiSendBtn?.addEventListener('click', () => renderAIVisual(aiInput?.value));
   aiInput?.addEventListener('keydown', (e) => { if (e.key === 'Enter') renderAIVisual(aiInput.value); });
 
-  // Example buttons → fill input and render
+  // Example buttons -> fill input and render
   document.querySelectorAll('.example-btn').forEach(btn => {
     btn.addEventListener('click', () => {
       const prompt = btn.dataset.prompt || btn.textContent;
@@ -1330,7 +1530,7 @@
     });
   });
 
-  // ── Keyboard ───────────────────────────────────────────────
+  // -- Keyboard -----------------------------------------------
   document.addEventListener('keydown', (e) => {
     if ((e.ctrlKey || e.metaKey) && e.key === 'k') { e.preventDefault(); document.getElementById('model-menu')?.classList.toggle('hidden'); }
     if (e.key === 'Escape') document.getElementById('model-menu')?.classList.add('hidden');
@@ -1341,7 +1541,7 @@
     if ((e.ctrlKey || e.metaKey) && e.key === '.') state.streamController?.abort();
   });
 
-  // ── Utilities ──────────────────────────────────────────────
+  // -- Utilities ----------------------------------------------
   function esc(s) { if (!s) return ''; const d = document.createElement('div'); d.textContent = String(s); return d.innerHTML; }
   function fmtBytes(b) { if (b >= 1e9) return (b / 1e9).toFixed(1) + ' GB'; if (b >= 1e6) return (b / 1e6).toFixed(1) + ' MB'; return (b / 1e3).toFixed(0) + ' KB'; }
   function fmtNum(n) { if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M'; if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K'; return String(n); }
