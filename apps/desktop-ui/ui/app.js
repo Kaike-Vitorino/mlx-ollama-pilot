@@ -462,7 +462,7 @@
           </svg>
         </div>
         <h3>Converse com o Agent</h3>
-        <p>Use o workspace para operar o runtime, revisar sessoes recentes e executar tarefas guiadas pelo provider selecionado.</p>
+        <p>Use a lista lateral para trocar de sessao e mantenha a conversa operacional no painel principal.</p>
       </div>`;
   }
 
@@ -492,7 +492,7 @@
     setText('agent-exec-pill', `Exec ${execMode}`);
     setText('agent-approval-pill', `Approval ${approvalMode}`);
     setText('agent-current-session', currentSession ? (currentSession.name || `Sessao ${currentSession.id?.substring(0, 6) || '?'}`) : 'Nenhuma sessao ativa');
-    setText('agent-current-session-meta', currentSession ? `${currentSession.message_count || 0} msg${(currentSession.message_count || 0) === 1 ? '' : 's'} nesta sessao` : 'Crie uma sessao ou use uma existente na faixa acima.');
+    setText('agent-current-session-meta', currentSession ? `${currentSession.message_count || 0} msg${(currentSession.message_count || 0) === 1 ? '' : 's'} nesta sessao` : 'Crie uma sessao ou use uma existente na lista lateral.');
     setText('agent-current-model', modelLabel);
     setText('agent-current-provider', `Provider ${providerLabel}`);
     setText('agent-current-execution', `Exec ${execMode}`);
