@@ -25,6 +25,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tokio::sync::mpsc;
@@ -243,6 +244,17 @@ impl AgentStreamFrame {
             total_tokens: None,
         }
     }
+}
+
+#[derive(Debug, Clone)]
+struct CapabilityInventorySnapshot {
+    provider: String,
+    model_id: String,
+    tools: Vec<(String, String)>,
+    skills: Vec<(String, String)>,
+    plugins: Vec<(String, String, String)>,
+    supports_exec: bool,
+    supports_web: bool,
 }
 
 /// Error response from agent endpoints.
@@ -1513,6 +1525,248 @@ fn percent_ratio(passed: usize, total: usize) -> f32 {
     ((passed as f32 / total as f32) * 1000.0).round() / 10.0
 }
 
+fn is_capability_inventory_request(message: &str) -> bool {
+    let text = message.trim().to_ascii_lowercase();
+    if text.is_empty() {
+        return false;
+    }
+
+    let inventory_nouns = [
+        "tool",
+        "tools",
+        "skill",
+        "skills",
+        "plugin",
+        "plugins",
+        "capability",
+        "capabilities",
+        "ferramenta",
+        "ferramentas",
+        "habilidade",
+        "habilidades",
+        "capacidade",
+        "capacidades",
+    ];
+    let inventory_verbs = [
+        "quais",
+        "qual",
+        "liste",
+        "listar",
+        "list",
+        "show",
+        "mostre",
+        "tem",
+        "possui",
+        "available",
+        "disponiveis",
+        "disponíveis",
+        "what do you have",
+    ];
+    let identity_clues = ["qual seu nome", "quem e voce", "quem é você", "who are you"];
+    let python_clues = [
+        "rodar python",
+        "run python",
+        "executar python",
+        "python tool",
+        "python?",
+    ];
+    let web_clues = [
+        "pesquisa na web",
+        "research na web",
+        "search na web",
+        "internet",
+        "web search",
+        "browse",
+        "browser",
+        "pesquisa web",
+    ];
+
+    let has_inventory_noun = inventory_nouns.iter().any(|term| text.contains(term));
+    let has_inventory_verb = inventory_verbs.iter().any(|term| text.contains(term));
+    let asks_identity = identity_clues.iter().any(|term| text.contains(term));
+    let asks_python = python_clues.iter().any(|term| text.contains(term));
+    let asks_web = web_clues.iter().any(|term| text.contains(term));
+
+    (has_inventory_noun && (has_inventory_verb || asks_identity)) || asks_python || asks_web
+}
+
+fn render_capability_inventory_markdown(snapshot: &CapabilityInventorySnapshot) -> String {
+    let tools = snapshot
+        .tools
+        .iter()
+        .map(|(name, description)| format!("- `{name}` - {description}"))
+        .collect::<Vec<_>>();
+    let skills = if snapshot.skills.is_empty() {
+        vec!["- Nenhuma skill ativa no momento.".to_string()]
+    } else {
+        snapshot
+            .skills
+            .iter()
+            .map(|(name, description)| format!("- `{name}` - {description}"))
+            .collect::<Vec<_>>()
+    };
+    let plugins = if snapshot.plugins.is_empty() {
+        vec!["- Nenhum plugin registrado no runtime.".to_string()]
+    } else {
+        snapshot
+            .plugins
+            .iter()
+            .map(|(name, status, capabilities)| {
+                if capabilities.is_empty() {
+                    format!("- `{name}` - status `{status}`")
+                } else {
+                    format!("- `{name}` - status `{status}` - caps: {capabilities}")
+                }
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let python_status = if snapshot.supports_exec {
+        "Sim, via `exec` para shell/PowerShell/Python dentro do workspace."
+    } else {
+        "Nao. A tool `exec` nao esta liberada neste perfil."
+    };
+    let web_status = if snapshot.supports_web {
+        "Sim. Existe pelo menos uma tool de busca/browse ativa."
+    } else {
+        "Nao. O Agent ainda nao expoe uma tool nativa de busca web/browser."
+    };
+
+    [
+        "**Nome:** MLX-Pilot Agent".to_string(),
+        format!(
+            "**Runtime atual:** provider `{}` com modelo `{}`",
+            snapshot.provider, snapshot.model_id
+        ),
+        String::new(),
+        format!("**Skills ativas ({})**", snapshot.skills.len()),
+        skills.join("\n"),
+        String::new(),
+        format!("**Plugins registrados ({})**", snapshot.plugins.len()),
+        plugins.join("\n"),
+        String::new(),
+        format!("**Tools ativas ({})**", snapshot.tools.len()),
+        tools.join("\n"),
+        String::new(),
+        "**Capacidades rapidas**".to_string(),
+        format!("- Python/exec: {python_status}"),
+        format!("- Pesquisa na web: {web_status}"),
+    ]
+    .join("\n")
+}
+
+async fn persist_agent_exchange(
+    state: &super::AppState,
+    session_id: &str,
+    user_message: &str,
+    assistant_message: &str,
+) {
+    let _ = state.session_store.ensure_session(session_id, None).await;
+    let _ = state
+        .session_store
+        .append(
+            session_id,
+            &mlx_agent_core::session::SessionMessage {
+                role: "user".to_string(),
+                content: user_message.to_string(),
+                tool_call_id: None,
+                tool_name: None,
+                timestamp: chrono::Utc::now(),
+            },
+        )
+        .await;
+    let _ = state
+        .session_store
+        .append(
+            session_id,
+            &mlx_agent_core::session::SessionMessage {
+                role: "assistant".to_string(),
+                content: assistant_message.to_string(),
+                tool_call_id: None,
+                tool_name: None,
+                timestamp: chrono::Utc::now(),
+            },
+        )
+        .await;
+}
+
+async fn build_capability_inventory_snapshot(
+    state: &super::AppState,
+    cfg: &super::config::AppConfig,
+    agent_cfg: &super::config::AgentUiConfig,
+    request: &AgentRunRequest,
+    provider: &str,
+    model_id: &str,
+    session_id: &str,
+) -> Result<CapabilityInventorySnapshot, AgentApiError> {
+    let policy = build_tool_policy_state(
+        agent_cfg,
+        Some(session_id),
+        request.enabled_tools.as_deref(),
+    );
+    let effective_tools =
+        mlx_agent_core::resolve_effective_tool_policy(&policy, DEFAULT_AGENT_ID, Some(session_id));
+    let mut tools = effective_tools
+        .entries
+        .into_iter()
+        .filter(|entry| entry.allowed && entry.implemented)
+        .map(|entry| (entry.name, entry.description))
+        .collect::<Vec<_>>();
+    tools.sort_by(|left, right| left.0.cmp(&right.0));
+
+    let supports_exec = tools.iter().any(|(name, _)| name == "exec");
+    let supports_web = tools.iter().any(|(name, description)| {
+        name.contains("web")
+            || name.contains("browser")
+            || description.to_ascii_lowercase().contains("web")
+            || description.to_ascii_lowercase().contains("browser")
+    });
+
+    let requested_skills = request
+        .enabled_skills
+        .as_ref()
+        .filter(|values| !values.is_empty())
+        .map(|values| enabled_set(values));
+    let node_manager = normalize_node_manager(None, &cfg.agent.node_package_manager);
+    let skills_catalog = load_skill_catalog(state, cfg).await?;
+    let mut skills = build_skills_check_response(skills_catalog.items, &node_manager)
+        .skills
+        .into_iter()
+        .filter(|skill| {
+            if let Some(requested) = requested_skills.as_ref() {
+                skill.eligible && requested.contains(&normalize_skill_name(&skill.name))
+            } else {
+                skill.active
+            }
+        })
+        .map(|skill| (skill.name, skill.description))
+        .collect::<Vec<_>>();
+    skills.sort_by(|left, right| left.0.cmp(&right.0));
+
+    let mut plugins = state
+        .plugin_manager
+        .list_plugins()
+        .await
+        .into_iter()
+        .map(|plugin| {
+            let status = plugin_health_status(&plugin);
+            let capabilities = plugin.capabilities.join(", ");
+            (plugin.id, status, capabilities)
+        })
+        .collect::<Vec<_>>();
+    plugins.sort_by(|left, right| left.0.cmp(&right.0));
+
+    Ok(CapabilityInventorySnapshot {
+        provider: provider.to_string(),
+        model_id: model_id.to_string(),
+        tools,
+        skills,
+        plugins,
+        supports_exec,
+        supports_web,
+    })
+}
+
 fn classify_channel_support(
     channel: &crate::channels::ChannelView,
 ) -> (String, bool, bool, Vec<String>, Vec<String>) {
@@ -2754,6 +3008,7 @@ async fn execute_agent_request(
     state: &super::AppState,
     request: AgentRunRequest,
 ) -> Result<AgentRunResponse, AgentApiError> {
+    let started_at = Instant::now();
     let message = request.message.trim();
     if message.is_empty() {
         return Err(AgentApiError::bad_request("message cannot be empty"));
@@ -2813,6 +3068,41 @@ async fn execute_agent_request(
                 provider
             )),
         ));
+    }
+
+    if is_capability_inventory_request(message) {
+        let session_id = request
+            .session_id
+            .clone()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(mlx_agent_core::SessionStore::new_session_id);
+        let snapshot = build_capability_inventory_snapshot(
+            state,
+            &cfg,
+            &agent_cfg,
+            &request,
+            &provider,
+            &model_id,
+            &session_id,
+        )
+        .await?;
+        let content = render_capability_inventory_markdown(&snapshot);
+        persist_agent_exchange(state, &session_id, &request.message, &content).await;
+
+        return Ok(AgentRunResponse {
+            session_id: session_id.clone(),
+            audit_id: Some(session_id),
+            provider,
+            model_id,
+            content,
+            iterations: 0,
+            tool_calls_made: 0,
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            total_tokens: 0,
+            latency_ms: started_at.elapsed().as_millis() as u64,
+            context_budget: None,
+        });
     }
 
     let registry = AgentProviderRegistry;
@@ -2920,12 +3210,19 @@ pub async fn agent_stream(
     tokio::spawn(async move {
         let mut run_task =
             tokio::spawn(async move { execute_agent_request(&state_clone, request).await });
+        let mut emitted_answer = false;
 
         loop {
             tokio::select! {
                 result = &mut run_task => {
                     match result {
                         Ok(Ok(response)) => {
+                            if !emitted_answer && !response.content.trim().is_empty() {
+                                let _ = tx.send(AgentStreamFrame::answer(
+                                    response.content.clone(),
+                                    response.session_id.clone(),
+                                )).await;
+                            }
                             let _ = tx.send(AgentStreamFrame::done(&response)).await;
                         }
                         Ok(Err(error)) => {
@@ -2948,6 +3245,7 @@ pub async fn agent_stream(
                             Some(AgentStreamFrame::thinking(delta, event_session_id))
                         }
                         AgentEvent::TextDelta { session_id: event_session_id, delta } if event_session_id == session_id => {
+                            emitted_answer = true;
                             Some(AgentStreamFrame::answer(delta, event_session_id))
                         }
                         AgentEvent::ToolCallStarted { session_id: event_session_id, tool, .. } if event_session_id == session_id => {
@@ -4340,6 +4638,55 @@ mod tests {
             normalize_agent_model_id("llamacpp", "llama::qwen3.gguf [llama.cpp]"),
             "qwen3.gguf"
         );
+    }
+
+    #[test]
+    fn capability_inventory_detector_matches_agent_capability_questions() {
+        assert!(is_capability_inventory_request(
+            "Qual seu nome? Quais skills, plugins e tools voce tem?",
+        ));
+        assert!(is_capability_inventory_request(
+            "Tem pesquisa na web e consegue rodar Python?",
+        ));
+        assert!(!is_capability_inventory_request(
+            "Crie um script Python para ordenar uma lista.",
+        ));
+    }
+
+    #[test]
+    fn capability_inventory_markdown_reflects_exec_and_web_flags() {
+        let content = render_capability_inventory_markdown(&CapabilityInventorySnapshot {
+            provider: "ollama".to_string(),
+            model_id: "qwen3.5:9b".to_string(),
+            tools: vec![
+                (
+                    "exec".to_string(),
+                    "Executar comando de shell no workspace.".to_string(),
+                ),
+                (
+                    "read_file".to_string(),
+                    "Ler o conteudo de um arquivo.".to_string(),
+                ),
+            ],
+            skills: vec![(
+                "code-reviewer".to_string(),
+                "Review changed code.".to_string(),
+            )],
+            plugins: vec![(
+                "memory".to_string(),
+                "loaded".to_string(),
+                "semantic-search".to_string(),
+            )],
+            supports_exec: true,
+            supports_web: false,
+        });
+
+        assert!(content.contains("MLX-Pilot Agent"));
+        assert!(content.contains("`exec`"));
+        assert!(content.contains("code-reviewer"));
+        assert!(content.contains("memory"));
+        assert!(content.contains("Python/exec: Sim"));
+        assert!(content.contains("Pesquisa na web: Nao"));
     }
 
     #[test]
