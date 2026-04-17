@@ -99,7 +99,10 @@ impl crate::Tool for GlobTool {
             is_error: false,
             metadata: HashMap::from([
                 ("pattern".to_string(), Value::String(pattern.to_string())),
-                ("count".to_string(), Value::Number((matches.len() as u64).into())),
+                (
+                    "count".to_string(),
+                    Value::Number((matches.len() as u64).into()),
+                ),
             ]),
         })
     }
@@ -129,9 +132,11 @@ fn collect_matches(
             message: format!("error reading dir entry: {error}"),
         })?;
         let path = entry.path();
-        let metadata = entry.metadata().map_err(|error| ToolError::ExecutionFailed {
-            message: format!("failed to read metadata '{}': {error}", path.display()),
-        })?;
+        let metadata = entry
+            .metadata()
+            .map_err(|error| ToolError::ExecutionFailed {
+                message: format!("failed to read metadata '{}': {error}", path.display()),
+            })?;
 
         if metadata.is_dir() {
             collect_matches(workspace_root, &path, pattern, matches, limit)?;
@@ -183,7 +188,11 @@ mod tests {
         let _ = fs::remove_dir_all(&tmp);
         fs::create_dir_all(tmp.join("src").join("nested")).unwrap();
         fs::write(tmp.join("src").join("main.ts"), "export const ok = true;").unwrap();
-        fs::write(tmp.join("src").join("nested").join("util.ts"), "export const util = true;").unwrap();
+        fs::write(
+            tmp.join("src").join("nested").join("util.ts"),
+            "export const util = true;",
+        )
+        .unwrap();
         fs::write(tmp.join("README.md"), "# test").unwrap();
 
         let tool = GlobTool::new();

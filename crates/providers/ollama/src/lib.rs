@@ -136,10 +136,7 @@ impl OllamaProvider {
             Err(_) => return false,
         };
 
-        let client = match reqwest::Client::builder()
-            .timeout(timeout)
-            .build()
-        {
+        let client = match reqwest::Client::builder().timeout(timeout).build() {
             Ok(client) => client,
             Err(_) => return false,
         };

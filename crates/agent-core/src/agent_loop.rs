@@ -290,7 +290,11 @@ impl AgentLoop {
             });
 
             let options = GenerationOptions {
-                temperature: Some(self.config.temperature.unwrap_or(profile.temperature_default)),
+                temperature: Some(
+                    self.config
+                        .temperature
+                        .unwrap_or(profile.temperature_default),
+                ),
                 max_tokens: Some(self.config.max_tokens_per_turn),
                 top_p: None,
                 airllm_enabled: None,
@@ -319,8 +323,9 @@ impl AgentLoop {
                 {
                     self.event_bus.emit(AgentEvent::ThinkingDelta {
                         session_id: session_id.clone(),
-                        delta: "Modelo atual nao suporta tools; seguindo em modo de resposta direta.\n"
-                            .to_string(),
+                        delta:
+                            "Modelo atual nao suporta tools; seguindo em modo de resposta direta.\n"
+                                .to_string(),
                     });
 
                     match self

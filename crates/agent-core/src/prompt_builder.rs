@@ -919,7 +919,9 @@ mod tests {
 
     #[test]
     fn capability_queries_expose_full_local_toolset() {
-        let selected = select_relevant_tool_names("quais tools, skills e plugins voce tem? pode rodar python?");
+        let selected = select_relevant_tool_names(
+            "quais tools, skills e plugins voce tem? pode rodar python?",
+        );
 
         for name in [
             "read_file",

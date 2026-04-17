@@ -1362,9 +1362,7 @@ fn spawn_ollama_stream(
 
                                 if !thinking.is_empty()
                                     && tx
-                                        .send(ChatStreamEvent::thinking_delta(
-                                            thinking.to_string(),
-                                        ))
+                                        .send(ChatStreamEvent::thinking_delta(thinking.to_string()))
                                         .await
                                         .is_err()
                                 {
@@ -1375,7 +1373,10 @@ fn spawn_ollama_stream(
                                     let is_answer = event.event == "answer_delta";
                                     if is_answer && !answer_status_sent {
                                         answer_status_sent = true;
-                                        if tx.send(ChatStreamEvent::status("answering")).await.is_err()
+                                        if tx
+                                            .send(ChatStreamEvent::status("answering"))
+                                            .await
+                                            .is_err()
                                         {
                                             return;
                                         }
@@ -1818,7 +1819,10 @@ fn annotate_agent_model_compatibility(mut model: ModelDescriptor) -> ModelDescri
         } else if is_known_chat_only_ollama_family(&combined) {
             (
                 Some("chat_only".to_string()),
-                Some("familia local conhecida por rejeitar tool calling no runtime atual".to_string()),
+                Some(
+                    "familia local conhecida por rejeitar tool calling no runtime atual"
+                        .to_string(),
+                ),
                 false,
             )
         } else if is_known_tool_ready_ollama_family(&combined) {

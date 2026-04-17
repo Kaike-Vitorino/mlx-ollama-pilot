@@ -123,7 +123,10 @@ impl crate::Tool for GrepTool {
             is_error: false,
             metadata: HashMap::from([
                 ("pattern".to_string(), Value::String(pattern.to_string())),
-                ("count".to_string(), Value::Number((matches.len() as u64).into())),
+                (
+                    "count".to_string(),
+                    Value::Number((matches.len() as u64).into()),
+                ),
             ]),
         })
     }
@@ -154,9 +157,11 @@ fn collect_matches(
             message: format!("error reading dir entry: {error}"),
         })?;
         let path = entry.path();
-        let metadata = entry.metadata().map_err(|error| ToolError::ExecutionFailed {
-            message: format!("failed to read metadata '{}': {error}", path.display()),
-        })?;
+        let metadata = entry
+            .metadata()
+            .map_err(|error| ToolError::ExecutionFailed {
+                message: format!("failed to read metadata '{}': {error}", path.display()),
+            })?;
 
         if metadata.is_dir() {
             collect_matches(workspace_root, &path, path_glob, regex, matches, limit)?;
@@ -236,7 +241,10 @@ mod tests {
         };
 
         let result = tool
-            .execute(&serde_json::json!({"pattern": "println", "path": "src/**/*.rs"}), &ctx)
+            .execute(
+                &serde_json::json!({"pattern": "println", "path": "src/**/*.rs"}),
+                &ctx,
+            )
             .await
             .unwrap();
 

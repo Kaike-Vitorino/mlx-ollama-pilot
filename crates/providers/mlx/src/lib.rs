@@ -150,7 +150,15 @@ impl MlxProvider {
 
         matches!(
             name.to_ascii_lowercase().as_str(),
-            "blobs" | "manifests" | "xet" | "node_modules" | "target" | "dist" | "tts-venv" | ".venv" | "venv"
+            "blobs"
+                | "manifests"
+                | "xet"
+                | "node_modules"
+                | "target"
+                | "dist"
+                | "tts-venv"
+                | ".venv"
+                | "venv"
         )
     }
 
