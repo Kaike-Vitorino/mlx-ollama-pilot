@@ -530,6 +530,12 @@ code { font-family: var(--font-mono); }
 }
 .model-menu-item:hover { background: var(--bg-hover); }
 .model-menu-item.selected { background: var(--cyan-soft); }
+.model-menu-info {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
 .model-menu-name {
   font-family: var(--font-mono);
   font-size: 12px;
@@ -537,6 +543,39 @@ code { font-family: var(--font-mono); }
 }
 .model-menu-meta {
   font-size: 11px;
+  color: var(--text-tertiary);
+}
+.model-menu-badges {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.model-capability-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 22px;
+  padding: 3px 9px;
+  border-radius: var(--r-full);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.04);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: var(--text-secondary);
+}
+.model-capability-badge.tool-ready {
+  color: var(--green);
+  background: var(--green-soft);
+  border-color: rgba(46, 196, 182, 0.24);
+}
+.model-capability-badge.chat-only {
+  color: #ffb35c;
+  background: rgba(255, 179, 92, 0.12);
+  border-color: rgba(255, 179, 92, 0.2);
+}
+.model-capability-badge.unknown {
   color: var(--text-tertiary);
 }
 
@@ -1241,6 +1280,10 @@ code { font-family: var(--font-mono); }
 .installed-meta {
   font-size: 11px;
   color: var(--text-tertiary);
+}
+.installed-capability {
+  display: block;
+  margin-top: 6px;
 }
 .installed-actions {
   display: flex;

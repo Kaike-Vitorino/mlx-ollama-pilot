@@ -57,6 +57,7 @@ function createFixture({
   cachedModels,
   cachedCurrentModel,
   openClawAvailable = true,
+  agentConfigResponse,
 } = {}) {
   let sessions = [
     { id: "sess-1", name: "Operacao", message_count: 3 },
@@ -144,10 +145,26 @@ function createFixture({
     if (path === "/models") {
       return jsonResponse(modelsResponse ?? [
         {
-          id: "mlx-community/Qwen3-4B-4bit",
-          name: "Qwen3 4B",
+          id: "ollama::qwen3.5:9b",
+          name: "qwen3.5:9b [Ollama]",
           provider: "ollama",
           is_available: true,
+          agent_tool_mode: "tool_ready",
+          agent_recommended: true,
+        },
+        {
+          id: "ollama::deepseek-r1:8b",
+          name: "deepseek-r1:8b [Ollama]",
+          provider: "ollama",
+          is_available: true,
+          agent_tool_mode: "chat_only",
+        },
+        {
+          id: "mlx-community/Qwen3-4B-4bit",
+          name: "Qwen3 4B [MLX]",
+          provider: "mlx",
+          is_available: true,
+          agent_tool_mode: "chat_only",
         },
       ]);
     }
@@ -160,9 +177,9 @@ function createFixture({
     }
 
     if (path === "/agent/config" && method === "GET") {
-      return jsonResponse({
+      return jsonResponse(agentConfigResponse ?? {
         provider: "ollama",
-        model_id: "mlx-community/Qwen3-4B-4bit",
+        model_id: "qwen3.5:9b",
         execution_mode: "full",
         approval_mode: "ask",
       });
@@ -216,6 +233,8 @@ function createFixture({
       return jsonResponse([
         { name: "read_file", enabled: true },
         { name: "list_dir", enabled: true },
+        { name: "glob", enabled: true },
+        { name: "grep", enabled: true },
         { name: "exec", enabled: false },
       ]);
     }
@@ -346,7 +365,7 @@ test("agent workspace prompts, submits runs, and creates sessions", async () => 
 
     const runCall = fixture.fetchCalls.find((entry) => entry.path === "/agent/stream");
     assert.ok(runCall);
-    assert.equal(runCall.body.model_id, "mlx-community/Qwen3-4B-4bit");
+    assert.equal(runCall.body.model_id, "ollama::qwen3.5:9b");
     assert.match(fixture.document.getElementById("agent-chat-messages")?.textContent || "", /Resposta do agent/);
     assert.match(fixture.document.getElementById("agent-chat-messages")?.textContent || "", /read_file/);
     assert.match(fixture.document.querySelector("#agent-chat-messages .thinking-content")?.textContent || "", /Validando politica final/);
@@ -412,6 +431,39 @@ test("workspace hides OpenClaw when unavailable and preserves cached model shell
     assert.ok(fixture.document.getElementById("tab-openclaw")?.classList.contains("hidden"));
     assert.equal(fixture.document.getElementById("current-model")?.textContent, "Qwen Local");
     assert.match(fixture.document.getElementById("installed-count")?.textContent || "", /modelo/);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("agent filtra modelos chat-only e repara para qwen3.5:9b", async () => {
+  const fixture = createFixture({
+    agentConfigResponse: {
+      provider: "ollama",
+      model_id: "deepseek-r1:8b",
+      execution_mode: "full",
+      approval_mode: "ask",
+    },
+  });
+
+  try {
+    await flush(6);
+
+    fixture.document.querySelector('.tab[data-panel="agent"]')?.click();
+    await flush(4);
+
+    const menu = fixture.document.getElementById("model-menu");
+    fixture.document.getElementById("model-picker-btn")?.click();
+    await flush(2);
+
+    assert.match(fixture.document.getElementById("current-model")?.textContent || "", /qwen3\.5:9b/i);
+    assert.ok(menu?.textContent.includes("Tool-ready"));
+    assert.ok(!menu?.textContent.includes("deepseek-r1:8b [Ollama]"));
+    assert.ok(fixture.fetchCalls.some((entry) =>
+      entry.path === "/agent/config"
+      && entry.method === "POST"
+      && entry.body?.model_id === "qwen3.5:9b"
+    ));
   } finally {
     fixture.cleanup();
   }

@@ -66,6 +66,7 @@
     environmentVars: [],
     activeDiscoverTab: 'catalog',
     openclawInstalled: false,
+    activePanel: 'chat',
   };
 
   function stripModelDecoration(value) {
@@ -123,6 +124,116 @@
 
   function activeModelId() {
     return resolveModelId(state.currentModel || state.agentConfig?.model_id || '', state.agentConfig?.provider);
+  }
+
+  function currentPanelId() {
+    return state.activePanel || document.querySelector('.tab.active')?.dataset.panel || 'chat';
+  }
+
+  function isAgentPanelActive() {
+    return currentPanelId() === 'agent';
+  }
+
+  function modelCapabilityMode(model) {
+    if (!model) return 'unknown';
+
+    const explicit = String(model.agent_tool_mode || '').trim().toLowerCase();
+    if (explicit) return explicit;
+
+    const provider = String(model.provider || inferModelProvider(model.id, '')).trim().toLowerCase();
+    const label = `${model.id || ''} ${model.name || ''}`.toLowerCase();
+    if (provider !== 'ollama') return 'chat_only';
+    if (/(embed|embedding|nomic-embed|mxbai-embed|qwen3-vl|vision|-vl\b)/.test(label)) return 'chat_only';
+    if (/(deepseek-r1|dolphin3|dolphin-mixtral|mythomax)/.test(label)) return 'chat_only';
+    if (/(llama3\.1|qwen2\.5|qwen2\.5-coder|qwen3:8b|qwen3:14b|qwen3\.5:9b)/.test(label)) return 'tool_ready';
+    return 'unknown';
+  }
+
+  function modelCapabilityReason(model) {
+    if (model?.agent_tool_reason) return model.agent_tool_reason;
+    const mode = modelCapabilityMode(model);
+    if (mode === 'tool_ready') return 'Compatível com tool calling no Agent.';
+    if (mode === 'chat_only') return 'Indicado para chat simples neste runtime.';
+    return 'Compatibilidade ainda não validada para uso com tools.';
+  }
+
+  function isToolReadyModel(model) {
+    return modelCapabilityMode(model) === 'tool_ready';
+  }
+
+  function recommendedAgentModelId() {
+    const preferred = state.models.find(model =>
+      isToolReadyModel(model)
+      && (model.agent_recommended || /qwen3\.5:9b/i.test(`${model.id || ''} ${model.name || ''}`))
+    );
+    if (preferred) return preferred.id;
+    return state.models.find(isToolReadyModel)?.id || '';
+  }
+
+  function visibleModelsForCurrentPanel() {
+    if (!isAgentPanelActive()) return state.models;
+    return state.models.filter(isToolReadyModel);
+  }
+
+  function capabilityBadge(mode) {
+    if (mode === 'tool_ready') return { label: 'Tool-ready', tone: 'tool-ready' };
+    if (mode === 'chat_only') return { label: 'Chat-only', tone: 'chat-only' };
+    return { label: 'Verificar', tone: 'unknown' };
+  }
+
+  function agentConfigModelId(modelId, provider = '') {
+    const resolvedId = resolveModelId(modelId, provider);
+    const inferredProvider = inferModelProvider(resolvedId || modelId, provider);
+    const raw = stripModelDecoration(resolvedId || modelId);
+    if (inferredProvider === 'ollama') return raw.replace(/^ollama::/i, '');
+    if (inferredProvider === 'mlx') return raw.replace(/^mlx::/i, '');
+    if (inferredProvider === 'llamacpp') return raw.replace(/^llama::/i, '');
+    return raw;
+  }
+
+  async function persistAgentModelSelection(modelId) {
+    const resolvedId = resolveModelId(modelId, state.agentConfig?.provider);
+    if (!resolvedId) return false;
+
+    const model = state.models.find(entry => entry.id === resolvedId);
+    const provider = inferModelProvider(resolvedId, model?.provider || state.agentConfig?.provider || 'ollama');
+    const payload = {
+      ...(state.agentConfig || {}),
+      provider,
+      model_id: agentConfigModelId(resolvedId, provider),
+    };
+
+    if (
+      state.agentConfig
+      && state.agentConfig.provider === payload.provider
+      && state.agentConfig.model_id === payload.model_id
+    ) {
+      return true;
+    }
+
+    try {
+      const saved = await api('/agent/config', { method: 'POST', body: JSON.stringify(payload) });
+      state.agentConfig = saved || payload;
+      return true;
+    } catch (error) {
+      console.error('Agent model save failed:', error);
+      return false;
+    } finally {
+      hydrateModelShell();
+      updateAgentWorkspaceSummary();
+    }
+  }
+
+  async function ensureAgentCompatibleModel({ persist = false } = {}) {
+    const current = state.models.find(model => model.id === activeModelId());
+    if (current && isToolReadyModel(current)) return true;
+
+    const fallbackId = recommendedAgentModelId();
+    if (!fallbackId) return false;
+
+    selectModel(fallbackId);
+    if (persist) await persistAgentModelSelection(fallbackId);
+    return true;
   }
 
   // -- API ----------------------------------------------------
@@ -249,6 +360,9 @@
         provider: inferModelProvider(normalizedId, provider),
         path: normalizedId,
         is_available: false,
+        agent_tool_mode: null,
+        agent_tool_reason: null,
+        agent_recommended: false,
       },
     ];
   }
@@ -609,6 +723,12 @@
       }
       populateAgentPolicy(config);
       hydrateModelShell();
+      if (configuredModel) {
+        const configuredEntry = state.models.find(model => model.id === configuredModel);
+        if (configuredEntry && !isToolReadyModel(configuredEntry)) {
+          void ensureAgentCompatibleModel({ persist: true });
+        }
+      }
       updateAgentWorkspaceSummary();
     } catch (e) {
       console.error('Agent config load failed:', e);
@@ -667,6 +787,9 @@
         if (state.agentConfig?.model_id) ensureVisibleModel(state.agentConfig.model_id, state.agentConfig.provider);
         if (state.currentModel) state.currentModel = resolveModelId(state.currentModel, state.agentConfig?.provider);
         if (state.currentModel) ensureVisibleModel(state.currentModel, state.agentConfig?.provider);
+        if (state.agentConfig && (!state.agentConfig.model_id || isAgentPanelActive())) {
+          void ensureAgentCompatibleModel({ persist: isAgentPanelActive() });
+        }
         state.modelsLoaded = true;
         state.modelsStale = false;
         saveModelCache();
@@ -709,26 +832,42 @@
     const menu = document.getElementById('model-menu');
     if (!menu) return;
     menu.innerHTML = '';
-    if (state.models.length === 0) {
+    const visibleModels = visibleModelsForCurrentPanel();
+    if (visibleModels.length === 0) {
+      if (isAgentPanelActive()) {
+        menu.innerHTML = '<div class="model-menu-item" style="pointer-events:none;color:var(--text-tertiary)">Nenhum modelo Tool-ready disponivel para o Agent</div>';
+        return;
+      }
       menu.innerHTML = '<div class="model-menu-item" style="pointer-events:none;color:var(--text-tertiary)">Nenhum modelo encontrado</div>';
       return;
     }
-    state.models.forEach(m => {
+    visibleModels.forEach(m => {
+      const badge = capabilityBadge(modelCapabilityMode(m));
       const item = document.createElement('div');
       item.className = 'model-menu-item' + (state.currentModel === m.id ? ' selected' : '');
       item.dataset.model = m.id;
-      item.innerHTML = `<span class="model-menu-name">${esc(m.name || m.id)}</span><span class="model-menu-meta">${esc(m.provider || '')}</span>`;
+      item.title = modelCapabilityReason(m);
+      item.innerHTML = `
+        <div class="model-menu-info">
+          <span class="model-menu-name">${esc(m.name || m.id)}</span>
+          <span class="model-menu-meta">${esc(m.provider || '')}</span>
+        </div>
+        <div class="model-menu-badges">
+          <span class="model-capability-badge ${badge.tone}">${badge.label}</span>
+        </div>`;
       item.addEventListener('click', (e) => {
         e.stopPropagation();
-        selectModel(m.id);
+        selectModel(m.id, { persistAgentConfig: isAgentPanelActive() });
         menu.classList.add('hidden');
       });
       menu.appendChild(item);
     });
-    if (!state.currentModel && state.models.length > 0) selectModel(state.models[0].id);
+    if (!state.currentModel && visibleModels.length > 0) {
+      selectModel(visibleModels[0].id, { persistAgentConfig: isAgentPanelActive() });
+    }
   }
 
-  function selectModel(id) {
+  function selectModel(id, { persistAgentConfig = false } = {}) {
     const resolvedId = resolveModelId(id, state.agentConfig?.provider);
     state.currentModel = resolvedId || id;
     try {
@@ -741,6 +880,7 @@
     if (nameEl) nameEl.textContent = model ? (model.name || model.id) : humanizeModelLabel(state.currentModel);
     renderModelPicker();
     updateAgentWorkspaceSummary();
+    if (persistAgentConfig) void persistAgentModelSelection(state.currentModel);
   }
 
   function renderInstalledModels() {
@@ -752,7 +892,8 @@
         count.textContent = 'Carregando modelos...';
       } else {
         const suffix = state.modelsLoading ? ' • atualizando...' : '';
-        count.textContent = `${state.models.length} modelo${state.models.length !== 1 ? 's' : ''} instalado${state.models.length !== 1 ? 's' : ''}${suffix}`;
+        const toolReadyCount = state.models.filter(isToolReadyModel).length;
+        count.textContent = `${state.models.length} modelo${state.models.length !== 1 ? 's' : ''} instalado${state.models.length !== 1 ? 's' : ''} • ${toolReadyCount} Tool-ready${suffix}`;
       }
     }
     list.innerHTML = '';
@@ -765,6 +906,7 @@
       return;
     }
     state.models.forEach(m => {
+      const badge = capabilityBadge(modelCapabilityMode(m));
       const item = document.createElement('div');
       item.className = 'installed-item';
       const ic = modelIcon(m.id);
@@ -773,6 +915,7 @@
         <div class="installed-info">
           <span class="installed-name">${esc(m.name || m.id)}</span>
           <span class="installed-meta">${esc(m.provider || '')} &middot; ${m.is_available ? 'Disponível' : 'Indisponível'}</span>
+          <span class="installed-capability"><span class="model-capability-badge ${badge.tone}" title="${esc(modelCapabilityReason(m))}">${badge.label}</span></span>
         </div>
         <div class="installed-actions">
           <button class="action-btn" data-act="chat" data-id="${esc(m.id)}">Chat</button>
@@ -1602,6 +1745,7 @@
       target = 'chat';
     }
 
+    state.activePanel = target;
     document.querySelectorAll('.tab').forEach(t => { t.classList.remove('active'); t.setAttribute('aria-selected', 'false'); });
     document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
     const tab = document.querySelector(`[data-panel="${target}"]`);
@@ -1609,13 +1753,17 @@
     if (tab) { tab.classList.add('active'); tab.setAttribute('aria-selected', 'true'); }
     if (panel) panel.classList.add('active');
     syncShellLayout(target);
+    renderModelPicker();
 
     if (target === 'discover') {
       searchCatalog('llama');
       if (state.activeDiscoverTab === 'installed') showInstalledModels();
     }
     if (target === 'openclaw') { loadRuntimeStatus(); loadOpenClawObservability(); }
-    if (target === 'agent') updateAgentWorkspaceSummary();
+    if (target === 'agent') {
+      void ensureAgentCompatibleModel({ persist: true });
+      updateAgentWorkspaceSummary();
+    }
     if (target === 'ai-interaction') initAICanvas();
   }
 
