@@ -11,5 +11,7 @@ pub mod types;
 
 // Re-exports for convenience.
 pub use tool::Tool;
-pub use tools::{EditFileTool, ExecTool, ListDirTool, ReadFileTool, WriteFileTool};
+pub use tools::{
+    EditFileTool, ExecTool, GlobTool, GrepTool, ListDirTool, ReadFileTool, WriteFileTool,
+};
 pub use types::{ExecutionMode, ParamSchema, ToolContext, ToolDefinition, ToolError, ToolResult};

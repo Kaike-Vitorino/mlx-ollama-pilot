@@ -424,6 +424,9 @@ impl ModelProvider for LlamaCppProvider {
                     provider: self.provider_id().to_string(),
                     path: path.display().to_string(),
                     is_available: true,
+                    agent_tool_mode: None,
+                    agent_tool_reason: None,
+                    agent_recommended: false,
                 }
             })
             .collect::<Vec<_>>();

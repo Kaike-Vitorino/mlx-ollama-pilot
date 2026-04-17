@@ -190,6 +190,8 @@ impl Default for AgentUiConfig {
             "write_file".to_string(),
             "edit_file".to_string(),
             "list_dir".to_string(),
+            "glob".to_string(),
+            "grep".to_string(),
             "exec".to_string(),
             "sessions_list".to_string(),
             "sessions_history".to_string(),
@@ -1097,8 +1099,32 @@ fn normalize_loaded_config(cfg: &mut AppConfig) {
         );
     }
 
+    seed_agent_tool_defaults(&mut cfg.agent);
     normalize_mlx_command(cfg);
     repair_openclaw_paths(cfg);
+}
+
+fn seed_agent_tool_defaults(agent: &mut AgentUiConfig) {
+    for tool_name in ["glob", "grep"] {
+        if !agent.enabled_tools.iter().any(|entry| entry == tool_name) {
+            agent.enabled_tools.push(tool_name.to_string());
+        }
+    }
+
+    let default_override = agent
+        .tool_policy
+        .agent_overrides
+        .entry("default".to_string())
+        .or_default();
+
+    for tool_name in ["glob", "grep"] {
+        if default_override.deny.iter().any(|entry| entry == tool_name) {
+            continue;
+        }
+        if !default_override.allow.iter().any(|entry| entry == tool_name) {
+            default_override.allow.push(tool_name.to_string());
+        }
+    }
 }
 
 fn repair_openclaw_paths(cfg: &mut AppConfig) {
@@ -1108,8 +1134,10 @@ fn repair_openclaw_paths(cfg: &mut AppConfig) {
         cfg.openclaw_cli_path = resolved_cli_path.clone();
     }
 
-    let resolved_state_dir = resolve_openclaw_state_dir(&cfg.openclaw_state_dir, &resolved_cli_path);
-    let repaired_state_dir = !cfg.openclaw_state_dir.exists() && resolved_state_dir != cfg.openclaw_state_dir;
+    let resolved_state_dir =
+        resolve_openclaw_state_dir(&cfg.openclaw_state_dir, &resolved_cli_path);
+    let repaired_state_dir =
+        !cfg.openclaw_state_dir.exists() && resolved_state_dir != cfg.openclaw_state_dir;
     if repaired_state_dir {
         cfg.openclaw_state_dir = resolved_state_dir;
     }
@@ -1178,7 +1206,11 @@ fn resolve_openclaw_cli_path(current: &PathBuf) -> PathBuf {
     if let Some(home) = home_dir() {
         candidates.push(home.join("openclaw").join("openclaw.mjs"));
         candidates.push(home.join("prod").join("openclaw").join("openclaw.mjs"));
-        candidates.push(home.join("mlx-ollama-pilot").join("openclaw").join("openclaw.mjs"));
+        candidates.push(
+            home.join("mlx-ollama-pilot")
+                .join("openclaw")
+                .join("openclaw.mjs"),
+        );
     }
 
     let existing = dedupe_paths(candidates)
@@ -1491,7 +1523,12 @@ mod tests {
         assert_eq!(loaded.mlx_command, default_mlx_command());
         assert_eq!(
             loaded.agent.tool_policy.agent_overrides["default"].allow,
-            vec!["read_file".to_string(), "exec".to_string()]
+            vec![
+                "read_file".to_string(),
+                "exec".to_string(),
+                "glob".to_string(),
+                "grep".to_string(),
+            ]
         );
         assert!(loaded.compatibility.channels.is_empty());
         assert_eq!(loaded.agent.security.security_mode, default_security_mode());
@@ -1642,7 +1679,7 @@ fn default_agent_fallback_provider() -> String {
 }
 
 fn default_agent_model() -> String {
-    "qwen2.5:7b".to_string()
+    "qwen3.5:9b".to_string()
 }
 
 fn default_agent_execution_mode() -> String {

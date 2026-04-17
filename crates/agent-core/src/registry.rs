@@ -113,15 +113,19 @@ impl ToolRegistry {
         self.tools.is_empty()
     }
 
-    /// Create a registry pre-loaded with all 5 built-in tools.
+    /// Create a registry pre-loaded with the built-in local tools.
     pub fn with_builtins() -> Self {
-        use mlx_agent_tools::{EditFileTool, ExecTool, ListDirTool, ReadFileTool, WriteFileTool};
+        use mlx_agent_tools::{
+            EditFileTool, ExecTool, GlobTool, GrepTool, ListDirTool, ReadFileTool, WriteFileTool,
+        };
 
         let mut registry = Self::new();
         registry.register(Arc::new(ReadFileTool::new()));
         registry.register(Arc::new(WriteFileTool::new()));
         registry.register(Arc::new(EditFileTool::new()));
         registry.register(Arc::new(ListDirTool::new()));
+        registry.register(Arc::new(GlobTool::new()));
+        registry.register(Arc::new(GrepTool::new()));
         registry.register(Arc::new(ExecTool::new()));
         registry
     }
@@ -485,13 +489,15 @@ mod tests {
     }
 
     #[test]
-    fn with_builtins_has_five_tools() {
+    fn with_builtins_has_local_search_tools() {
         let reg = ToolRegistry::with_builtins();
-        assert_eq!(reg.len(), 5);
+        assert_eq!(reg.len(), 7);
         assert!(reg.get("read_file").is_some());
         assert!(reg.get("write_file").is_some());
         assert!(reg.get("edit_file").is_some());
         assert!(reg.get("list_dir").is_some());
+        assert!(reg.get("glob").is_some());
+        assert!(reg.get("grep").is_some());
         assert!(reg.get("exec").is_some());
     }
 
@@ -536,9 +542,11 @@ mod tests {
     fn definitions_returns_all_tool_schemas() {
         let reg = ToolRegistry::with_builtins();
         let defs = reg.definitions();
-        assert_eq!(defs.len(), 5);
+        assert_eq!(defs.len(), 7);
         let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
         assert!(names.contains(&"read_file"));
+        assert!(names.contains(&"glob"));
+        assert!(names.contains(&"grep"));
         assert!(names.contains(&"exec"));
     }
 

@@ -700,7 +700,11 @@ async fn update_config(Json(new_config): Json<AppConfig>) -> Result<Json<AppConf
 async fn list_models(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<ModelDescriptor>>, AppError> {
-    let models = list_chat_models(&state).await?;
+    let models = list_chat_models(&state)
+        .await?
+        .into_iter()
+        .map(annotate_agent_model_compatibility)
+        .collect::<Vec<_>>();
     Ok(Json(models))
 }
 
@@ -1132,7 +1136,10 @@ async fn chat_stream(
 
 #[cfg(test)]
 mod tests {
-    use super::{find_workspace_root_from, has_workspace_marker};
+    use super::{
+        annotate_agent_model_compatibility, find_workspace_root_from, has_workspace_marker,
+    };
+    use mlx_ollama_core::ModelDescriptor;
     use std::fs;
 
     #[test]
@@ -1161,6 +1168,34 @@ mod tests {
 
         let resolved = find_workspace_root_from(&nested).unwrap();
         assert_eq!(resolved, root);
+    }
+
+    #[test]
+    fn annotates_tool_ready_and_chat_only_models() {
+        let ready = annotate_agent_model_compatibility(ModelDescriptor {
+            id: "ollama::qwen3.5:9b".to_string(),
+            name: "qwen3.5:9b [Ollama]".to_string(),
+            provider: "ollama".to_string(),
+            path: "qwen3.5:9b".to_string(),
+            is_available: true,
+            agent_tool_mode: None,
+            agent_tool_reason: None,
+            agent_recommended: false,
+        });
+        assert_eq!(ready.agent_tool_mode.as_deref(), Some("tool_ready"));
+        assert!(ready.agent_recommended);
+
+        let chat_only = annotate_agent_model_compatibility(ModelDescriptor {
+            id: "ollama::deepseek-r1:8b".to_string(),
+            name: "deepseek-r1:8b [Ollama]".to_string(),
+            provider: "ollama".to_string(),
+            path: "deepseek-r1:8b".to_string(),
+            is_available: true,
+            agent_tool_mode: None,
+            agent_tool_reason: None,
+            agent_recommended: false,
+        });
+        assert_eq!(chat_only.agent_tool_mode.as_deref(), Some("chat_only"));
     }
 }
 
@@ -1725,6 +1760,9 @@ async fn list_chat_models(state: &AppState) -> Result<Vec<ModelDescriptor>, Prov
                     provider: model.provider,
                     path: model.path,
                     is_available: model.is_available,
+                    agent_tool_mode: None,
+                    agent_tool_reason: None,
+                    agent_recommended: false,
                 });
             }
 
@@ -1735,6 +1773,9 @@ async fn list_chat_models(state: &AppState) -> Result<Vec<ModelDescriptor>, Prov
                     provider: model.provider,
                     path: model.path,
                     is_available: model.is_available,
+                    agent_tool_mode: None,
+                    agent_tool_reason: None,
+                    agent_recommended: false,
                 });
             }
 
@@ -1745,6 +1786,9 @@ async fn list_chat_models(state: &AppState) -> Result<Vec<ModelDescriptor>, Prov
                     provider: model.provider,
                     path: model.path,
                     is_available: model.is_available,
+                    agent_tool_mode: None,
+                    agent_tool_reason: None,
+                    agent_recommended: false,
                 });
             }
 
@@ -1759,6 +1803,82 @@ async fn list_chat_models(state: &AppState) -> Result<Vec<ModelDescriptor>, Prov
             Ok(combined)
         }
     }
+}
+
+fn annotate_agent_model_compatibility(mut model: ModelDescriptor) -> ModelDescriptor {
+    let combined = format!("{} {}", model.id, model.name).to_ascii_lowercase();
+
+    let (mode, reason, recommended) = if model.provider.trim().eq_ignore_ascii_case("ollama") {
+        if is_embedding_or_vision_model(&combined) {
+            (
+                Some("chat_only".to_string()),
+                Some("familia focada em embedding, visao ou uso nao agentico".to_string()),
+                false,
+            )
+        } else if is_known_chat_only_ollama_family(&combined) {
+            (
+                Some("chat_only".to_string()),
+                Some("familia local conhecida por rejeitar tool calling no runtime atual".to_string()),
+                false,
+            )
+        } else if is_known_tool_ready_ollama_family(&combined) {
+            (
+                Some("tool_ready".to_string()),
+                Some("familia validada para tool calling no agent local".to_string()),
+                combined.contains("qwen3.5:9b"),
+            )
+        } else {
+            (
+                Some("unknown".to_string()),
+                Some("compatibilidade de tools ainda nao validada neste runtime".to_string()),
+                false,
+            )
+        }
+    } else {
+        (
+            Some("chat_only".to_string()),
+            Some("provider local atual nao expõe tool calling no agent".to_string()),
+            false,
+        )
+    };
+
+    model.agent_tool_mode = mode;
+    model.agent_tool_reason = reason;
+    model.agent_recommended = recommended;
+    model
+}
+
+fn is_embedding_or_vision_model(model: &str) -> bool {
+    [
+        "embed",
+        "embedding",
+        "nomic-embed",
+        "mxbai-embed",
+        "qwen3-vl",
+        "vision",
+        "-vl",
+    ]
+    .iter()
+    .any(|needle| model.contains(needle))
+}
+
+fn is_known_chat_only_ollama_family(model: &str) -> bool {
+    ["deepseek-r1", "dolphin3", "dolphin-mixtral", "mythomax"]
+        .iter()
+        .any(|needle| model.contains(needle))
+}
+
+fn is_known_tool_ready_ollama_family(model: &str) -> bool {
+    [
+        "llama3.1",
+        "qwen2.5",
+        "qwen2.5-coder",
+        "qwen3:8b",
+        "qwen3:14b",
+        "qwen3.5:9b",
+    ]
+    .iter()
+    .any(|needle| model.contains(needle))
 }
 
 async fn chat_with_routing(

@@ -155,7 +155,7 @@ pub fn tool_catalog() -> Vec<ToolCatalogEntry> {
             "read_file",
             ToolSection::Filesystem,
             ToolRisk::Low,
-            "Read the contents of a file inside the workspace sandbox.",
+            "Ler o conteudo de um arquivo dentro do workspace. Equivalente a Read.",
             &[
                 ToolProfileName::Minimal,
                 ToolProfileName::Coding,
@@ -166,7 +166,29 @@ pub fn tool_catalog() -> Vec<ToolCatalogEntry> {
             "list_dir",
             ToolSection::Filesystem,
             ToolRisk::Low,
-            "List files and directories inside the workspace sandbox.",
+            "Listar arquivos e diretorios dentro do workspace. Equivalente a LS.",
+            &[
+                ToolProfileName::Minimal,
+                ToolProfileName::Coding,
+                ToolProfileName::Full,
+            ],
+        ),
+        entry(
+            "glob",
+            ToolSection::Filesystem,
+            ToolRisk::Low,
+            "Encontrar arquivos por padrao glob no workspace. Equivalente a Glob.",
+            &[
+                ToolProfileName::Minimal,
+                ToolProfileName::Coding,
+                ToolProfileName::Full,
+            ],
+        ),
+        entry(
+            "grep",
+            ToolSection::Filesystem,
+            ToolRisk::Low,
+            "Pesquisar texto ou regex em arquivos do workspace. Equivalente a Grep.",
             &[
                 ToolProfileName::Minimal,
                 ToolProfileName::Coding,
@@ -177,35 +199,35 @@ pub fn tool_catalog() -> Vec<ToolCatalogEntry> {
             "write_file",
             ToolSection::Filesystem,
             ToolRisk::High,
-            "Write or create a file inside the workspace sandbox.",
+            "Criar ou sobrescrever um arquivo no workspace. Equivalente a Write.",
             &[ToolProfileName::Coding, ToolProfileName::Full],
         ),
         entry(
             "edit_file",
             ToolSection::Filesystem,
             ToolRisk::High,
-            "Apply an exact-text edit to a file inside the workspace sandbox.",
+            "Aplicar uma edicao precisa de texto em arquivo. Equivalente a Edit ou MultiEdit.",
             &[ToolProfileName::Coding, ToolProfileName::Full],
         ),
         entry(
             "exec",
             ToolSection::Execution,
             ToolRisk::Critical,
-            "Run a shell command in the workspace.",
+            "Executar comando de shell no workspace. Equivalente a Bash ou PowerShell.",
             &[ToolProfileName::Coding, ToolProfileName::Full],
         ),
         entry(
             "message",
             ToolSection::Messaging,
             ToolRisk::High,
-            "Send an outbound message through a configured channel account.",
+            "Enviar mensagem por um canal configurado.",
             &[ToolProfileName::Messaging, ToolProfileName::Full],
         ),
         entry(
             "sessions_list",
             ToolSection::Sessions,
             ToolRisk::Low,
-            "List locally stored agent sessions.",
+            "Listar sessoes locais do agent.",
             &[
                 ToolProfileName::Minimal,
                 ToolProfileName::Coding,
@@ -217,7 +239,7 @@ pub fn tool_catalog() -> Vec<ToolCatalogEntry> {
             "sessions_history",
             ToolSection::Sessions,
             ToolRisk::Low,
-            "Read message history from a local agent session.",
+            "Ler o historico de mensagens de uma sessao local.",
             &[
                 ToolProfileName::Minimal,
                 ToolProfileName::Coding,
@@ -229,7 +251,7 @@ pub fn tool_catalog() -> Vec<ToolCatalogEntry> {
             "sessions_spawn",
             ToolSection::Sessions,
             ToolRisk::Medium,
-            "Create a new local agent session.",
+            "Criar uma nova sessao local do agent. Equivalente funcional a Agent ou Task.",
             &[
                 ToolProfileName::Coding,
                 ToolProfileName::Messaging,
@@ -240,7 +262,7 @@ pub fn tool_catalog() -> Vec<ToolCatalogEntry> {
             "sessions_send",
             ToolSection::Sessions,
             ToolRisk::Medium,
-            "Append a message to a local agent session.",
+            "Enviar mensagem para uma sessao local existente.",
             &[
                 ToolProfileName::Coding,
                 ToolProfileName::Messaging,
@@ -251,7 +273,7 @@ pub fn tool_catalog() -> Vec<ToolCatalogEntry> {
             "sessions_status",
             ToolSection::Sessions,
             ToolRisk::Low,
-            "Inspect metadata and current status for a local agent session.",
+            "Inspecionar metadados e status atual de uma sessao local.",
             &[
                 ToolProfileName::Minimal,
                 ToolProfileName::Coding,
@@ -263,7 +285,7 @@ pub fn tool_catalog() -> Vec<ToolCatalogEntry> {
             "memory_search",
             ToolSection::Memory,
             ToolRisk::Low,
-            "Search compact local memory artifacts generated from prior sessions.",
+            "Pesquisar memorias compactadas geradas por sessoes anteriores.",
             &[
                 ToolProfileName::Minimal,
                 ToolProfileName::Coding,
@@ -275,7 +297,7 @@ pub fn tool_catalog() -> Vec<ToolCatalogEntry> {
             "memory_get",
             ToolSection::Memory,
             ToolRisk::Low,
-            "Fetch a local memory artifact by id.",
+            "Ler um artefato de memoria local pelo id.",
             &[
                 ToolProfileName::Minimal,
                 ToolProfileName::Coding,
@@ -493,6 +515,8 @@ mod tests {
     fn coding_profile_contains_exec() {
         let tools = profile_tool_names(ToolProfileName::Coding);
         assert!(tools.contains("exec"));
+        assert!(tools.contains("glob"));
+        assert!(tools.contains("grep"));
         assert!(!tools.contains("message"));
     }
 
