@@ -1100,6 +1100,7 @@ fn normalize_loaded_config(cfg: &mut AppConfig) {
     }
 
     seed_agent_tool_defaults(&mut cfg.agent);
+    upgrade_legacy_agent_model_default(&mut cfg.agent);
     normalize_mlx_command(cfg);
     repair_openclaw_paths(cfg);
 }
@@ -1121,9 +1122,40 @@ fn seed_agent_tool_defaults(agent: &mut AgentUiConfig) {
         if default_override.deny.iter().any(|entry| entry == tool_name) {
             continue;
         }
-        if !default_override.allow.iter().any(|entry| entry == tool_name) {
+        if !default_override
+            .allow
+            .iter()
+            .any(|entry| entry == tool_name)
+        {
             default_override.allow.push(tool_name.to_string());
         }
+    }
+}
+
+fn upgrade_legacy_agent_model_default(agent: &mut AgentUiConfig) {
+    if !agent.provider.trim().eq_ignore_ascii_case("ollama") {
+        return;
+    }
+
+    let normalized = agent
+        .model_id
+        .trim()
+        .strip_prefix("ollama::")
+        .unwrap_or(agent.model_id.trim())
+        .strip_suffix(" [Ollama]")
+        .or_else(|| agent.model_id.trim().strip_suffix(" [ollama]"))
+        .unwrap_or_else(|| {
+            agent
+                .model_id
+                .trim()
+                .strip_prefix("ollama::")
+                .unwrap_or(agent.model_id.trim())
+        })
+        .trim()
+        .to_ascii_lowercase();
+
+    if normalized == "qwen2.5:7b" {
+        agent.model_id = default_agent_model();
     }
 }
 
@@ -1532,6 +1564,28 @@ mod tests {
         );
         assert!(loaded.compatibility.channels.is_empty());
         assert_eq!(loaded.agent.security.security_mode, default_security_mode());
+    }
+
+    #[test]
+    fn legacy_agent_default_model_is_upgraded_to_qwen35() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("settings.json");
+        let legacy = json!({
+            "schema_version": APP_CONFIG_SCHEMA_VERSION,
+            "agent": {
+                "provider": "ollama",
+                "model_id": "qwen2.5:7b"
+            }
+        });
+
+        fs::write(
+            &path,
+            serde_json::to_string_pretty(&legacy).expect("serialize legacy"),
+        )
+        .expect("write legacy settings");
+
+        let loaded = AppConfig::load_settings_from(&path);
+        assert_eq!(loaded.agent.model_id, "qwen3.5:9b");
     }
 }
 
