@@ -1,6 +1,7 @@
 //! `ToolRegistry` — registration, lookup, dispatch, and JSON Schema
 //! validation of tools.
 
+use crate::capabilities::{CapabilityAuthority, CapabilityBinding, CapabilityError};
 use mlx_agent_tools::{Tool, ToolContext, ToolDefinition, ToolError, ToolResult};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -18,6 +19,8 @@ struct RegisteredTool {
 /// actual `Tool` implementations and dispatch calls.
 pub struct ToolRegistry {
     tools: HashMap<String, RegisteredTool>,
+    capability_binding: Option<CapabilityBinding>,
+    capability_authority: Option<Arc<CapabilityAuthority>>,
 }
 
 impl ToolRegistry {
@@ -25,6 +28,8 @@ impl ToolRegistry {
     pub fn new() -> Self {
         Self {
             tools: HashMap::new(),
+            capability_binding: None,
+            capability_authority: None,
         }
     }
 
@@ -63,6 +68,14 @@ impl ToolRegistry {
 
         // Validate params against JSON Schema.
         self.validate_params(entry, params)?;
+
+        if let (Some(authority), Some(binding)) =
+            (&self.capability_authority, &self.capability_binding)
+        {
+            authority
+                .authorize_tool(binding, tool_name, params, &ctx.workspace_root)
+                .map_err(map_capability_error)?;
+        }
 
         entry.tool.execute(params, ctx).await
     }
@@ -129,11 +142,29 @@ impl ToolRegistry {
         registry.register(Arc::new(ExecTool::new()));
         registry
     }
+
+    pub fn bind_capabilities(
+        &mut self,
+        authority: Arc<CapabilityAuthority>,
+        binding: CapabilityBinding,
+    ) {
+        self.capability_authority = Some(authority);
+        self.capability_binding = Some(binding);
+    }
 }
 
 impl Default for ToolRegistry {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+fn map_capability_error(error: CapabilityError) -> ToolError {
+    match error {
+        CapabilityError::Denied { reason } => ToolError::PermissionDenied { reason },
+        other => ToolError::ExecutionFailed {
+            message: other.to_string(),
+        },
     }
 }
 
@@ -467,8 +498,13 @@ fn compat_config_schema(title: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        CapabilityAuthority, CapabilityBinding, CapabilityContextKind, CapabilityManifest,
+        CapabilityScopeRules, CapabilityScopes, CapabilitySubject,
+    };
     use mlx_agent_tools::{ExecutionMode, ToolContext};
     use std::path::PathBuf;
+    use std::sync::Arc;
 
     fn test_ctx() -> ToolContext {
         ToolContext {
@@ -536,6 +572,55 @@ mod tests {
             err.contains("validation failed") || err.contains("content"),
             "got: {err}"
         );
+    }
+
+    #[tokio::test]
+    async fn dispatch_enforces_capabilities_before_tool_execution() {
+        let mut authority = CapabilityAuthority::new();
+        authority
+            .insert_manifest(CapabilityManifest {
+                identifier: "agent-default".to_string(),
+                version: "1.0.0".to_string(),
+                permissions: vec!["fs:read".to_string()],
+                contexts: vec![CapabilityContextKind::Agent],
+                windows: Vec::new(),
+                platforms: Vec::new(),
+                scopes: CapabilityScopes {
+                    fs: CapabilityScopeRules {
+                        allow: vec!["$WORKSPACE/src/**/*".to_string()],
+                        deny: Vec::new(),
+                    },
+                    process: CapabilityScopeRules::default(),
+                    network: CapabilityScopeRules::default(),
+                },
+            })
+            .expect("insert manifest");
+
+        let mut reg = ToolRegistry::with_builtins();
+        reg.bind_capabilities(
+            Arc::new(authority),
+            CapabilityBinding {
+                manifest_id: "agent-default".to_string(),
+                subject: CapabilitySubject::agent(),
+            },
+        );
+
+        let mut ctx = test_ctx();
+        ctx.workspace_root = PathBuf::from("C:/workspace/project");
+
+        reg.dispatch(
+            "read_file",
+            &serde_json::json!({"path":"src/main.rs"}),
+            &ctx,
+        )
+        .await
+        .expect_err("tool execution should fail later because file does not exist");
+
+        let denied = reg
+            .dispatch("read_file", &serde_json::json!({"path":"secret.txt"}), &ctx)
+            .await
+            .expect_err("capability should deny secret file");
+        assert!(denied.to_string().contains("filesystem scope"));
     }
 
     #[test]

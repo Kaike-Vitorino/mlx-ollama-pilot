@@ -58,6 +58,10 @@ impl MlxProvider {
         Self { cfg }
     }
 
+    pub fn config(&self) -> &MlxProviderConfig {
+        &self.cfg
+    }
+
     fn resolve_model_path(&self, model_id: &str) -> PathBuf {
         let candidate = PathBuf::from(model_id);
         if candidate.is_absolute() {
@@ -509,10 +513,20 @@ fn default_mlx_command() -> String {
         .or_else(|_| std::env::var("USERPROFILE"))
         .ok()
         .map(PathBuf::from)
-        .map(|home| home.join("mlx-env").join("bin").join("mlx_lm.generate"))
+        .map(|home| {
+            if cfg!(windows) {
+                home.join("mlx-env")
+                    .join("Scripts")
+                    .join("mlx_lm.generate.exe")
+            } else {
+                home.join("mlx-env").join("bin").join("mlx_lm.generate")
+            }
+        })
         .unwrap_or_else(|| PathBuf::from("mlx_lm.generate"));
     if preferred.exists() {
         preferred.display().to_string()
+    } else if cfg!(windows) {
+        "mlx_lm.generate.exe".to_string()
     } else {
         "mlx_lm.generate".to_string()
     }
@@ -541,7 +555,7 @@ fn default_airllm_python_command() -> String {
         preferred.display().to_string()
     } else {
         if cfg!(windows) {
-            "python".to_string()
+            "py".to_string()
         } else {
             "python3".to_string()
         }
@@ -644,6 +658,12 @@ impl ModelProvider for MlxProvider {
     }
 
     async fn list_models(&self) -> Result<Vec<ModelDescriptor>, ProviderError> {
+        if cfg!(target_os = "windows") {
+            return Err(ProviderError::Unavailable {
+                details: "mlx provider nao e suportado nativamente no Windows neste runtime; use ollama ou llama.cpp".to_string(),
+            });
+        }
+
         if !self.cfg.models_dir.exists() {
             tokio::fs::create_dir_all(&self.cfg.models_dir)
                 .await
@@ -717,6 +737,12 @@ impl ModelProvider for MlxProvider {
     }
 
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, ProviderError> {
+        if cfg!(target_os = "windows") {
+            return Err(ProviderError::Unavailable {
+                details: "mlx provider nao e suportado nativamente no Windows neste runtime; use ollama ou llama.cpp".to_string(),
+            });
+        }
+
         if request.messages.is_empty() {
             return Err(ProviderError::InvalidRequest {
                 details: "messages cannot be empty".to_string(),

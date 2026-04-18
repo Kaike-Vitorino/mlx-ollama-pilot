@@ -2,6 +2,7 @@ use crate::channels::{ChannelService, MessageSendRequest};
 use mlx_agent_core::{
     ContextBudgetTelemetry, MemoryStore, SessionMessage, SessionStore, ToolRegistry,
 };
+use mlx_agent_tools::{list_file_checkpoints, restore_file_checkpoint};
 use mlx_agent_tools::{ParamSchema, Tool, ToolContext, ToolError, ToolResult};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap};
@@ -29,6 +30,8 @@ pub fn register_runtime_tools(registry: &mut ToolRegistry, services: &RuntimeToo
     )));
     registry.register(Arc::new(MemorySearchTool::new(services.memory.clone())));
     registry.register(Arc::new(MemoryGetTool::new(services.memory.clone())));
+    registry.register(Arc::new(CheckpointsListTool::new()));
+    registry.register(Arc::new(CheckpointRestoreTool::new()));
 }
 
 struct MessageTool {
@@ -458,6 +461,103 @@ impl MemoryGetTool {
                 "required": ["memory_id"]
             }),
         }
+    }
+}
+
+struct CheckpointsListTool {
+    schema: ParamSchema,
+}
+
+impl CheckpointsListTool {
+    fn new() -> Self {
+        Self {
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "session_id": { "type": "string" },
+                    "limit": { "type": "integer" }
+                }
+            }),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl Tool for CheckpointsListTool {
+    fn name(&self) -> &str {
+        "checkpoints_list"
+    }
+
+    fn description(&self) -> &str {
+        "List local rollback checkpoints recorded for file mutations in the current workspace."
+    }
+
+    fn parameters(&self) -> &ParamSchema {
+        &self.schema
+    }
+
+    async fn execute(&self, params: &Value, ctx: &ToolContext) -> Result<ToolResult, ToolError> {
+        if matches!(ctx.mode, mlx_agent_tools::ExecutionMode::Locked) {
+            return Err(ToolError::ModeRestriction { mode: ctx.mode });
+        }
+        let session_id = optional_string(params, "session_id");
+        let limit = params["limit"].as_u64().unwrap_or(20) as usize;
+        let checkpoints =
+            list_file_checkpoints(&ctx.workspace_root, session_id.as_deref(), limit).await?;
+        Ok(ok_json(json!(checkpoints)))
+    }
+}
+
+struct CheckpointRestoreTool {
+    schema: ParamSchema,
+}
+
+impl CheckpointRestoreTool {
+    fn new() -> Self {
+        Self {
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "checkpoint_id": { "type": "string" }
+                },
+                "required": ["checkpoint_id"]
+            }),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl Tool for CheckpointRestoreTool {
+    fn name(&self) -> &str {
+        "checkpoint_restore"
+    }
+
+    fn description(&self) -> &str {
+        "Restore a file mutation checkpoint created by write_file or edit_file."
+    }
+
+    fn parameters(&self) -> &ParamSchema {
+        &self.schema
+    }
+
+    async fn execute(&self, params: &Value, ctx: &ToolContext) -> Result<ToolResult, ToolError> {
+        match ctx.mode {
+            mlx_agent_tools::ExecutionMode::Locked | mlx_agent_tools::ExecutionMode::ReadOnly => {
+                return Err(ToolError::ModeRestriction { mode: ctx.mode });
+            }
+            mlx_agent_tools::ExecutionMode::DryRun => {
+                let checkpoint_id = required_string(params, "checkpoint_id")?;
+                return Ok(ok_text(format!(
+                    "[DRY RUN] would restore checkpoint {}",
+                    checkpoint_id
+                )));
+            }
+            mlx_agent_tools::ExecutionMode::Full => {}
+        }
+
+        let checkpoint_id = required_string(params, "checkpoint_id")?;
+        let restored = restore_file_checkpoint(&ctx.workspace_root, &checkpoint_id).await?;
+        Ok(ok_json(json!(restored)))
     }
 }
 

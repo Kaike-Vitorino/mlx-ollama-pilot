@@ -210,10 +210,28 @@ pub fn tool_catalog() -> Vec<ToolCatalogEntry> {
             &[ToolProfileName::Coding, ToolProfileName::Full],
         ),
         entry(
+            "checkpoints_list",
+            ToolSection::Filesystem,
+            ToolRisk::Low,
+            "Listar checkpoints locais de rollback criados por ferramentas de arquivo.",
+            &[
+                ToolProfileName::Minimal,
+                ToolProfileName::Coding,
+                ToolProfileName::Full,
+            ],
+        ),
+        entry(
+            "checkpoint_restore",
+            ToolSection::Filesystem,
+            ToolRisk::High,
+            "Restaurar um checkpoint local para desfazer uma alteracao de arquivo.",
+            &[ToolProfileName::Coding, ToolProfileName::Full],
+        ),
+        entry(
             "exec",
             ToolSection::Execution,
             ToolRisk::Critical,
-            "Executar comando de shell no workspace. Equivalente a Bash ou PowerShell.",
+            "Executar programa local no workspace com fila local e sem operadores de shell.",
             &[ToolProfileName::Coding, ToolProfileName::Full],
         ),
         entry(

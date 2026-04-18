@@ -6,6 +6,7 @@ mod chat_stream;
 mod config;
 mod openclaw;
 mod plugins;
+mod runtime_doctor;
 mod secrets_vault;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -525,6 +526,10 @@ pub async fn run() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/config", get(get_config).post(update_config))
         .route("/health", get(health))
+        .route(
+            "/runtime/doctor",
+            get(runtime_doctor_get).post(runtime_doctor_run),
+        )
         .route("/models", get(list_models))
         .route("/models/rename", post(rename_model))
         .route("/models/{model_id}", delete(delete_model))
@@ -683,6 +688,22 @@ async fn health(State(state): State<AppState>) -> Json<HealthBody> {
         status: "ok",
         provider: state.provider_mode.label(),
     })
+}
+
+async fn runtime_doctor_get(
+    State(state): State<AppState>,
+) -> Result<Json<runtime_doctor::RuntimeDoctorReport>, AppError> {
+    Ok(Json(
+        runtime_doctor::inspect_runtime(&state, runtime_doctor::RuntimeDoctorRequest::default())
+            .await,
+    ))
+}
+
+async fn runtime_doctor_run(
+    State(state): State<AppState>,
+    Json(request): Json<runtime_doctor::RuntimeDoctorRequest>,
+) -> Result<Json<runtime_doctor::RuntimeDoctorReport>, AppError> {
+    Ok(Json(runtime_doctor::inspect_runtime(&state, request).await))
 }
 
 async fn get_config() -> Result<Json<AppConfig>, AppError> {
@@ -1889,6 +1910,7 @@ async fn chat_with_routing(
     state: &AppState,
     request: ChatRequest,
 ) -> Result<ChatResponse, ProviderError> {
+    let provider_pinned = request_has_explicit_provider(&request.model_id);
     let routed = route_model_request(state, &request.model_id).await?;
     let request = ChatRequest {
         model_id: routed.normalized_model_id,
@@ -1896,10 +1918,45 @@ async fn chat_with_routing(
         options: request.options,
     };
 
-    match routed.provider {
-        RoutedProvider::Mlx => state.mlx_provider.chat(request).await,
-        RoutedProvider::Llamacpp => state.llamacpp_provider.chat(request).await,
-        RoutedProvider::Ollama => state.ollama_provider.chat(request).await,
+    match send_chat_with_provider(state, routed.provider, request.clone()).await {
+        Ok(response) => Ok(response),
+        Err(error)
+            if provider_pinned || !matches!(state.provider_mode, LocalProviderMode::Auto) =>
+        {
+            Err(error)
+        }
+        Err(mut last_error) => {
+            warn!(
+                "primary routed provider {:?} failed for '{}': {}. trying fallbacks",
+                routed.provider, request.model_id, last_error
+            );
+            for provider in auto_provider_priority() {
+                if provider == routed.provider {
+                    continue;
+                }
+                if !provider_has_model(state, provider, &request.model_id).await {
+                    continue;
+                }
+
+                match send_chat_with_provider(state, provider, request.clone()).await {
+                    Ok(response) => {
+                        warn!(
+                            "fallback provider {:?} succeeded for '{}'",
+                            provider, request.model_id
+                        );
+                        return Ok(response);
+                    }
+                    Err(error) => {
+                        warn!(
+                            "fallback provider {:?} also failed for '{}': {}",
+                            provider, request.model_id, error
+                        );
+                        last_error = error;
+                    }
+                }
+            }
+            Err(last_error)
+        }
     }
 }
 
@@ -1986,55 +2043,107 @@ async fn route_model_request(
         });
     }
 
-    let mlx_models = state.mlx_provider.list_models().await?;
-    if mlx_models
-        .iter()
-        .any(|entry| entry.id == trimmed || entry.path == trimmed)
-    {
+    let mut fallback_provider = None;
+    for provider in auto_provider_priority() {
+        match list_models_for_provider(state, provider).await {
+            Ok(models) => {
+                if models
+                    .iter()
+                    .any(|entry| entry.id == trimmed || entry.path == trimmed)
+                {
+                    return Ok(RoutedModel {
+                        provider,
+                        normalized_model_id: trimmed.to_string(),
+                    });
+                }
+                if fallback_provider.is_none() && !models.is_empty() {
+                    fallback_provider = Some(provider);
+                }
+            }
+            Err(error) => match provider {
+                RoutedProvider::Ollama => {
+                    warn!("ollama unavailable while routing model '{trimmed}': {error}");
+                }
+                RoutedProvider::Llamacpp => {
+                    debug!("llamacpp unavailable while routing model '{trimmed}': {error}");
+                }
+                RoutedProvider::Mlx => {
+                    debug!("mlx unavailable while routing model '{trimmed}': {error}");
+                }
+            },
+        }
+    }
+
+    if let Some(provider) = fallback_provider {
         return Ok(RoutedModel {
-            provider: RoutedProvider::Mlx,
+            provider,
             normalized_model_id: trimmed.to_string(),
         });
     }
 
-    match state.llamacpp_provider.list_models().await {
-        Ok(llamacpp_models) => {
-            if llamacpp_models
-                .iter()
-                .any(|entry| entry.id == trimmed || entry.path == trimmed)
-            {
-                return Ok(RoutedModel {
-                    provider: RoutedProvider::Llamacpp,
-                    normalized_model_id: trimmed.to_string(),
-                });
-            }
-        }
-        Err(error) => {
-            debug!("llamacpp unavailable while routing model '{trimmed}': {error}");
-        }
-    }
-
-    match state.ollama_provider.list_models().await {
-        Ok(ollama_models) => {
-            if ollama_models
-                .iter()
-                .any(|entry| entry.id == trimmed || entry.path == trimmed)
-            {
-                return Ok(RoutedModel {
-                    provider: RoutedProvider::Ollama,
-                    normalized_model_id: trimmed.to_string(),
-                });
-            }
-        }
-        Err(error) => {
-            warn!("ollama unavailable while routing model '{trimmed}': {error}");
-        }
-    }
-
-    Ok(RoutedModel {
-        provider: RoutedProvider::Mlx,
-        normalized_model_id: trimmed.to_string(),
+    Err(ProviderError::ModelNotFound {
+        model_id: trimmed.to_string(),
     })
+}
+
+async fn send_chat_with_provider(
+    state: &AppState,
+    provider: RoutedProvider,
+    request: ChatRequest,
+) -> Result<ChatResponse, ProviderError> {
+    match provider {
+        RoutedProvider::Mlx => state.mlx_provider.chat(request).await,
+        RoutedProvider::Llamacpp => state.llamacpp_provider.chat(request).await,
+        RoutedProvider::Ollama => state.ollama_provider.chat(request).await,
+    }
+}
+
+async fn list_models_for_provider(
+    state: &AppState,
+    provider: RoutedProvider,
+) -> Result<Vec<ModelDescriptor>, ProviderError> {
+    match provider {
+        RoutedProvider::Mlx => state.mlx_provider.list_models().await,
+        RoutedProvider::Llamacpp => state.llamacpp_provider.list_models().await,
+        RoutedProvider::Ollama => state.ollama_provider.list_models().await,
+    }
+}
+
+async fn provider_has_model(state: &AppState, provider: RoutedProvider, model_id: &str) -> bool {
+    list_models_for_provider(state, provider)
+        .await
+        .map(|models| {
+            models
+                .iter()
+                .any(|entry| entry.id == model_id || entry.path == model_id)
+        })
+        .unwrap_or(false)
+}
+
+fn auto_provider_priority() -> Vec<RoutedProvider> {
+    if cfg!(target_os = "macos") && cfg!(target_arch = "aarch64") {
+        vec![
+            RoutedProvider::Mlx,
+            RoutedProvider::Llamacpp,
+            RoutedProvider::Ollama,
+        ]
+    } else {
+        vec![
+            RoutedProvider::Llamacpp,
+            RoutedProvider::Ollama,
+            RoutedProvider::Mlx,
+        ]
+    }
+}
+
+fn request_has_explicit_provider(model_id: &str) -> bool {
+    let trimmed = model_id.trim();
+    trimmed.starts_with("mlx::")
+        || trimmed.starts_with("ollama::")
+        || trimmed.starts_with("llama::")
+        || trimmed.ends_with(" [MLX]")
+        || trimmed.ends_with(" [Ollama]")
+        || trimmed.ends_with(" [llama.cpp]")
 }
 
 fn normalize_display_model_id(model_id: &str) -> (String, Option<RoutedProvider>) {

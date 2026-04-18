@@ -343,6 +343,7 @@ fn runtime_rules(mode: ExecutionMode, verbosity: VerbosityLevel) -> String {
         "Rules: Do not invent tool outputs.".to_string(),
         "Call tools with valid JSON arguments only when needed.".to_string(),
         "Prefer shortest correct answer.".to_string(),
+        "The exec tool only supports direct program invocations; do not use pipes, redirects, or shell chaining.".to_string(),
     ];
 
     match mode {

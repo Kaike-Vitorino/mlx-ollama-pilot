@@ -76,6 +76,10 @@ impl LlamaCppProvider {
         }
     }
 
+    pub fn config(&self) -> &LlamaCppProviderConfig {
+        &self.cfg
+    }
+
     async fn ensure_ready_for_model(&self, model_path: &Path) -> Result<String, ProviderError> {
         let mut state = self.state.lock().await;
         self.refresh_child_state_locked(&mut state).await?;
@@ -164,6 +168,12 @@ impl LlamaCppProvider {
                 Duration::from_secs(1800),
             )
             .await;
+
+            if command_available(self.cfg.server_binary.trim()).await
+                || command_available("llama-server").await
+            {
+                return Ok(());
+            }
         }
 
         Err(ProviderError::Unavailable {

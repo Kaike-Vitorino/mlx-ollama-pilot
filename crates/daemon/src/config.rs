@@ -45,6 +45,8 @@ pub struct AgentSecurityConfig {
     #[serde(default)]
     pub require_capabilities: bool,
     #[serde(default)]
+    pub capability_manifest_paths: Vec<String>,
+    #[serde(default)]
     pub airgapped: bool,
     #[serde(default)]
     pub owner_only: bool,
@@ -73,6 +75,7 @@ impl Default for AgentSecurityConfig {
         Self {
             security_mode: default_security_mode(),
             require_capabilities: false,
+            capability_manifest_paths: Vec::new(),
             airgapped: false,
             owner_only: false,
             block_direct_ip_egress: true,
@@ -200,6 +203,8 @@ impl Default for AgentUiConfig {
             "sessions_status".to_string(),
             "memory_search".to_string(),
             "memory_get".to_string(),
+            "checkpoints_list".to_string(),
+            "checkpoint_restore".to_string(),
         ];
         let mut tool_policy = AgentToolPolicyConfig::default();
         tool_policy.agent_overrides.insert(
@@ -956,6 +961,7 @@ impl AppConfig {
             self.mlx_airllm_safe_mode = false;
         }
 
+        normalize_mlx_airllm_python_command(&mut self);
         normalize_mlx_command(&mut self);
 
         self
@@ -1101,6 +1107,7 @@ fn normalize_loaded_config(cfg: &mut AppConfig) {
 
     seed_agent_tool_defaults(&mut cfg.agent);
     upgrade_legacy_agent_model_default(&mut cfg.agent);
+    normalize_mlx_airllm_python_command(cfg);
     normalize_mlx_command(cfg);
     repair_openclaw_paths(cfg);
 }
@@ -1366,10 +1373,20 @@ fn default_openclaw_state_dir() -> PathBuf {
 
 fn default_mlx_command() -> String {
     let preferred = home_dir()
-        .map(|home| home.join("mlx-env").join("bin").join("mlx_lm.generate"))
+        .map(|home| {
+            if cfg!(windows) {
+                home.join("mlx-env")
+                    .join("Scripts")
+                    .join("mlx_lm.generate.exe")
+            } else {
+                home.join("mlx-env").join("bin").join("mlx_lm.generate")
+            }
+        })
         .unwrap_or_else(|| PathBuf::from("mlx_lm.generate"));
     if preferred.exists() {
         preferred.display().to_string()
+    } else if cfg!(windows) {
+        "mlx_lm.generate.exe".to_string()
     } else {
         "mlx_lm.generate".to_string()
     }
@@ -1395,7 +1412,7 @@ fn default_mlx_airllm_python_command() -> String {
         preferred.display().to_string()
     } else {
         if cfg!(windows) {
-            "python".to_string()
+            "py".to_string()
         } else {
             "python3".to_string()
         }
@@ -1454,7 +1471,7 @@ fn normalize_mlx_command(cfg: &mut AppConfig) {
         }
     }
 
-    let is_python = matches!(cfg.mlx_command.as_str(), "python" | "python3");
+    let is_python = matches!(cfg.mlx_command.as_str(), "python" | "python3" | "py");
     if !is_python {
         return;
     }
@@ -1468,6 +1485,18 @@ fn normalize_mlx_command(cfg: &mut AppConfig) {
     if starts_with_legacy_module(&cfg.mlx_prefix_args, &["-m", "mlx_lm", "generate"]) {
         cfg.mlx_command = default_mlx_command();
         cfg.mlx_prefix_args.drain(0..3);
+    }
+}
+
+fn normalize_mlx_airllm_python_command(cfg: &mut AppConfig) {
+    let trimmed = cfg.mlx_airllm_python_command.trim();
+    if trimmed.is_empty() {
+        cfg.mlx_airllm_python_command = default_mlx_airllm_python_command();
+        return;
+    }
+
+    if cfg!(windows) && matches!(trimmed, "python" | "python3") {
+        cfg.mlx_airllm_python_command = default_mlx_airllm_python_command();
     }
 }
 

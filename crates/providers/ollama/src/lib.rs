@@ -57,6 +57,10 @@ impl OllamaProvider {
         }
     }
 
+    pub fn config(&self) -> &OllamaProviderConfig {
+        &self.cfg
+    }
+
     fn endpoint(&self, path: &str) -> Result<String, ProviderError> {
         let base = self.cfg.base_url.trim();
         if base.is_empty() {

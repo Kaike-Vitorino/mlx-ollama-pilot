@@ -7,6 +7,7 @@
 pub mod agent_loop;
 pub mod approval;
 pub mod audit;
+pub mod capabilities;
 pub mod context_budget;
 pub mod events;
 pub mod memory;
@@ -23,6 +24,10 @@ pub use approval::{
     ApprovalDecision, ApprovalError, ApprovalMode, ApprovalRequest, ApprovalService,
 };
 pub use audit::{AuditEventType, AuditLog, AuditLogEntry};
+pub use capabilities::{
+    CapabilityAuthority, CapabilityBinding, CapabilityContextKind, CapabilityError,
+    CapabilityManifest, CapabilityScopeRules, CapabilityScopes, CapabilitySubject,
+};
 pub use context_budget::{
     ContextBudgetInput, ContextBudgetManager, ContextBudgetOutput, ContextBudgetTelemetry,
     ContextSummaryArtifact, ResponseStyle,

@@ -12,6 +12,10 @@ use mlx_agent_core::approval::{
     ApprovalDecision, ApprovalMode, ApprovalService, DefaultApprovalService,
 };
 use mlx_agent_core::audit::{AuditLog, AuditLogEntry};
+use mlx_agent_core::capabilities::{
+    CapabilityAuthority, CapabilityBinding, CapabilityManifest, CapabilityScopeRules,
+    CapabilityScopes, CapabilitySubject,
+};
 use mlx_agent_core::events::{AgentEvent, EventBus};
 use mlx_agent_core::policy::{DefaultPolicyEngine, PolicyConfig, PolicyEngine};
 use mlx_agent_core::registry::ToolRegistry;
@@ -2718,7 +2722,11 @@ fn normalize_agent_model_id(provider: &str, model_id: &str) -> String {
     }
 }
 
-fn build_tool_registry(state: &super::AppState) -> ToolRegistry {
+fn build_tool_registry(
+    state: &super::AppState,
+    agent_cfg: &super::config::AgentUiConfig,
+    workspace_root: &Path,
+) -> Result<ToolRegistry, AgentApiError> {
     use mlx_agent_tools::{EditFileTool, ExecTool, ListDirTool, ReadFileTool, WriteFileTool};
 
     let mut registry = ToolRegistry::new();
@@ -2738,7 +2746,107 @@ fn build_tool_registry(state: &super::AppState) -> ToolRegistry {
         },
     );
 
-    registry
+    if agent_cfg.security.require_capabilities {
+        let mut authority = CapabilityAuthority::new();
+        let manifest_id = if agent_cfg.security.capability_manifest_paths.is_empty() {
+            let manifest = build_default_agent_capability_manifest(agent_cfg, workspace_root);
+            authority
+                .insert_manifest(manifest)
+                .map_err(|error| {
+                    AgentApiError::new(
+                        StatusCode::BAD_REQUEST,
+                        "invalid_capability_manifest",
+                        Some(error.to_string()),
+                    )
+                })?
+                .identifier
+                .clone()
+        } else {
+            let mut first_id = None;
+            for raw_path in &agent_cfg.security.capability_manifest_paths {
+                let path = PathBuf::from(raw_path);
+                let manifest = authority.load_manifest_path(&path).map_err(|error| {
+                    AgentApiError::new(
+                        StatusCode::BAD_REQUEST,
+                        "invalid_capability_manifest",
+                        Some(error.to_string()),
+                    )
+                })?;
+                if first_id.is_none() {
+                    first_id = Some(manifest.identifier.clone());
+                }
+            }
+            first_id.unwrap_or_else(|| "agent-default".to_string())
+        };
+
+        registry.bind_capabilities(
+            Arc::new(authority),
+            CapabilityBinding {
+                manifest_id,
+                subject: CapabilitySubject::agent(),
+            },
+        );
+    }
+
+    Ok(registry)
+}
+
+fn build_default_agent_capability_manifest(
+    agent_cfg: &super::config::AgentUiConfig,
+    workspace_root: &Path,
+) -> CapabilityManifest {
+    let workspace = workspace_root
+        .canonicalize()
+        .unwrap_or_else(|_| workspace_root.to_path_buf())
+        .to_string_lossy()
+        .replace('\\', "/");
+    let enabled_tools = effective_enabled_tools(agent_cfg);
+    let has_fs_read = ["read_file", "list_dir", "glob", "grep", "checkpoints_list"]
+        .iter()
+        .any(|tool| enabled_tools.contains(*tool));
+    let has_fs_write = ["write_file", "edit_file", "checkpoint_restore"]
+        .iter()
+        .any(|tool| enabled_tools.contains(*tool));
+    let has_process = enabled_tools.contains("exec");
+
+    let mut permissions = Vec::new();
+    if has_fs_read {
+        permissions.push("fs:read".to_string());
+    }
+    if has_fs_write {
+        permissions.push("fs:write".to_string());
+    }
+    if has_process {
+        permissions.push("process:spawn".to_string());
+    }
+
+    CapabilityManifest {
+        identifier: "agent-default".to_string(),
+        version: "1.0.0".to_string(),
+        permissions,
+        contexts: vec![mlx_agent_core::CapabilityContextKind::Agent],
+        windows: Vec::new(),
+        platforms: Vec::new(),
+        scopes: CapabilityScopes {
+            fs: CapabilityScopeRules {
+                allow: vec![format!("{workspace}/**/*"), format!("{workspace}/*")],
+                deny: Vec::new(),
+            },
+            process: CapabilityScopeRules {
+                allow: agent_cfg.security.exec_safe_bins.clone(),
+                deny: Vec::new(),
+            },
+            network: CapabilityScopeRules::default(),
+        },
+    }
+}
+
+fn effective_enabled_tools(agent_cfg: &super::config::AgentUiConfig) -> HashSet<&str> {
+    agent_cfg
+        .enabled_tools
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>()
 }
 
 fn collect_skill_hashes(
@@ -2862,7 +2970,7 @@ async fn run_agent_once(
     );
     let policy: Arc<dyn PolicyEngine> = Arc::new(DefaultPolicyEngine::new(policy_config));
 
-    let tool_registry = build_tool_registry(state);
+    let tool_registry = build_tool_registry(state, &agent_cfg, &workspace)?;
 
     let mut skill_runtime = mlx_agent_core::runtime::SkillRuntime::new();
     let skill_context = build_skill_requirement_context(agent_cfg)?;

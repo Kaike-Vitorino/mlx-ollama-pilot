@@ -80,14 +80,34 @@ Aplicado antes de qualquer execucao de tool:
 - owner-only mode
 - airgapped mode
 
-### 6.2 ApprovalService
+### 6.2 CapabilityAuthority
+
+Quando `agent.security.require_capabilities = true`, o runtime passa a exigir um manifest explicito
+para tools sensiveis, inspirado no modelo de capabilities do Tauri v2.
+
+Capacidades suportadas neste ciclo:
+- `fs:read`
+- `fs:write`
+- `process:spawn`
+
+Escopos suportados:
+- `scopes.fs.allow/deny`
+- `scopes.process.allow/deny`
+
+Comportamento:
+- o daemon pode carregar manifests por `agent.security.capability_manifest_paths`
+- se nenhum path for configurado, o backend deriva um manifest default do workspace e dos tools habilitados
+- a checagem acontece dentro de `ToolRegistry::dispatch`, antes da tool ser executada
+- o binding atual cobre o contexto `agent`; automations/plugins podem reutilizar a mesma autoridade no futuro
+
+### 6.3 ApprovalService
 
 Modos:
 - `auto`: aprova automaticamente
 - `ask`: exige aprovacao do usuario
 - `deny`: nega por padrao
 
-### 6.3 AuditLog
+### 6.4 AuditLog
 
 Registro JSONL estruturado por evento:
 - tool name
@@ -96,13 +116,23 @@ Registro JSONL estruturado por evento:
 - decisao/politica
 - erro resumido
 
-### 6.4 Secrets Vault
+### 6.5 Secrets Vault
 
 API keys sao armazenadas localmente de forma criptografada:
 - chave local dedicada
 - payload cifrado
 - configuracao persiste apenas referencia (`api_key_ref`) quando vault ativo
 - logs nao devem expor segredo em claro
+
+### 6.6 Execution Queue e Rollback Local
+
+O runtime agora assume que execucao de tool mutavel precisa de controle operacional:
+- `exec` roda como invocacao direta de processo, sem pipes, redirects ou encadeamento de shell
+- chamadas de `exec` entram em fila local com prioridade (`low` / `normal` / `high`)
+- a fila respeita limites por dominio (`inference`, `tools`, `memory`, `system`) e um limite total
+- `write_file` e `edit_file` gravam checkpoints locais em `.mlx-pilot/checkpoints/`
+- checkpoints podem ser listados e restaurados com `checkpoints_list` e `checkpoint_restore`
+- metadados de checkpoint incluem `session_id`, caminho relativo, hash do estado novo e, quando houver, `git HEAD`
 
 ## 7. Multi-provider
 
@@ -114,6 +144,17 @@ Recursos:
 - `base_url` customizado
 - headers customizados
 - fallback opcional provider primario -> fallback
+
+Tambem existe uma camada TypeScript standalone em `providers/unified_adapter/` para normalizar
+requests/responses de chat, tool-calling e roteamento entre:
+- Anthropic Messages
+- OpenAI Chat Completions
+- Ollama
+- MLX
+- llama.cpp
+
+Ela ainda nao e o caminho padrao do daemon, mas ja possui adapters, testes e exemplo E2E para futura
+integracao com frontends ou bridges JS locais.
 
 ## 8. Integracao UI
 
@@ -146,4 +187,6 @@ Para manter um historico rico e local da atividade do agente:
 
 - `POST /agent/stream` ainda em modo stub para stream full de eventos.
 - coverage de ferramentas e policy deve continuar evoluindo para cenario production-grade.
+- ainda nao existe um registry unificado de modelos locais com metadata rica de GGUF/MLX/Ollama.
+- a fila de execucao hoje cobre de forma concreta o dominio `system`; os outros dominios estao preparados no scheduler, mas ainda nao foram conectados a todos os fluxos do runtime.
 
