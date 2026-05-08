@@ -1629,6 +1629,65 @@
     }));
   }
 
+  function isWebSearchEnabled() {
+    const toggle = document.getElementById('web-search-toggle');
+    if (toggle) return toggle.classList.contains('active');
+    return Boolean(state.webSearchEnabled);
+  }
+
+  function renderWebSearchContext(searchResponse) {
+    const results = Array.isArray(searchResponse?.results) ? searchResponse.results : [];
+    if (!results.length) return '';
+
+    const lines = results.slice(0, 5).map((result, index) => {
+      const title = String(result.title || '').trim();
+      const url = String(result.url || '').trim();
+      const description = String(result.description || '').trim();
+      return [
+        `${index + 1}. ${title || url || 'Resultado sem titulo'}`,
+        url ? `URL: ${url}` : '',
+        description ? `Resumo: ${description}` : '',
+      ].filter(Boolean).join('\n');
+    });
+
+    return [
+      'Contexto de busca web recente. Use estes resultados quando responder e deixe claro quando a informacao veio da web.',
+      `Consulta: ${searchResponse.query || ''}`,
+      '',
+      lines.join('\n\n'),
+    ].join('\n');
+  }
+
+  async function buildWebAugmentedMessages(userText) {
+    if (!isWebSearchEnabled()) return state.messages;
+
+    try {
+      const searchResponse = await api('/web/brave/search', {
+        method: 'POST',
+        timeoutMs: API_SLOW_TIMEOUT_MS,
+        body: JSON.stringify({
+          query: userText,
+          max_results: 5,
+        }),
+      });
+      const webContext = renderWebSearchContext(searchResponse);
+      const resultCount = Array.isArray(searchResponse?.results) ? searchResponse.results.length : 0;
+      if (!webContext) {
+        addSystemMsg('Busca web executada, mas nenhum resultado relevante foi retornado.');
+        return state.messages;
+      }
+      addSystemMsg(`Busca web anexada ao contexto (${resultCount} resultado${resultCount === 1 ? '' : 's'}).`);
+      return [
+        { role: 'system', content: webContext },
+        ...state.messages,
+      ];
+    } catch (error) {
+      addSystemMsg(`Busca web nao executada: ${error.message}`);
+      pushConsoleEntry('warn', 'web', `Busca web falhou: ${error.message}`);
+      return state.messages;
+    }
+  }
+
   // -- Catalog ------------------------------------------------
   async function searchCatalog(query) {
     try {
@@ -1703,13 +1762,14 @@
 
     state.messages.push({ role: 'user', content: text });
     const assistantEl = addMessage('assistant', '');
-
     state.isStreaming = true;
+    const outboundMessages = await buildWebAugmentedMessages(text);
+
     state.streamController = new AbortController();
 
     const payload = {
       model_id: modelId,
-      messages: state.messages,
+      messages: outboundMessages,
       options: { temperature: 0.2, airllm_enabled: state.airllmEnabled },
     };
 
@@ -2754,6 +2814,8 @@
 
   // -- Toggle Chips -------------------------------------------
   document.querySelectorAll('.toggle-chip').forEach(chip => {
+    if (chip.id === 'web-search-toggle') state.webSearchEnabled = chip.classList.contains('active');
+    if (chip.id === 'airllm-toggle') state.airllmEnabled = chip.classList.contains('active');
     chip.addEventListener('click', () => {
       chip.classList.toggle('active');
       if (chip.id === 'web-search-toggle') state.webSearchEnabled = chip.classList.contains('active');

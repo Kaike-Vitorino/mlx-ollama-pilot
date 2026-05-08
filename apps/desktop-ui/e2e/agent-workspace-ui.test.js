@@ -308,6 +308,20 @@ function createFixture({
       return jsonResponse(hiddenEnvironment);
     }
 
+    if (path === "/web/brave/search" && method === "POST") {
+      return jsonResponse({
+        query: body?.query || "",
+        key_source: "env_file",
+        results: [
+          {
+            title: "MLX Pilot release notes",
+            url: "https://example.test/mlx-pilot",
+            description: "Resultado atual usado para validar contexto de busca web.",
+          },
+        ],
+      });
+    }
+
     if (path === "/chat/stream" && method === "POST") {
       return streamingResponse([
         JSON.stringify({ event: "status", status: "thinking" }),
@@ -438,6 +452,10 @@ test("chat stream shows thinking and renders markdown output", async () => {
 
     const streamCall = fixture.fetchCalls.find((entry) => entry.path === "/chat/stream");
     assert.ok(streamCall);
+    assert.ok(fixture.fetchCalls.some((entry) => entry.path === "/web/brave/search"));
+    assert.equal(streamCall.body.messages[0].role, "system");
+    assert.match(streamCall.body.messages[0].content, /Contexto de busca web recente/);
+    assert.match(streamCall.body.messages[0].content, /MLX Pilot release notes/);
 
     const thinkingText = fixture.document.querySelector("#chat-messages .assistant-message .thinking-content")?.textContent || "";
     const answerHtml = fixture.document.querySelector("#chat-messages .assistant-message .msg-content")?.innerHTML || "";
