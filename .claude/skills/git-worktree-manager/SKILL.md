@@ -2,7 +2,7 @@
 name: git-worktree-manager
 description: Create and manage isolated git worktrees and branches for implementation, review, or experiments without disturbing the current workspace.
 metadata:
-  openclaw:
+  claude:
     capabilities:
       fs_read: true
       fs_write: true
@@ -33,3 +33,4 @@ Use this skill when the task benefits from an isolated branch or a parallel work
 - parallel implementation tracks
 - review or reproduction branches
 - temporary isolation from a dirty main workspace
+

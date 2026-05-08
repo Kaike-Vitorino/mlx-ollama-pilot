@@ -2,7 +2,7 @@
 name: code-reviewer
 description: Review changed code for correctness, regressions, missing tests, risky assumptions, and rollout hazards, with findings presented before summary.
 metadata:
-  openclaw:
+  claude:
     capabilities:
       fs_read: true
       exec: true
@@ -37,3 +37,4 @@ Prioritize:
 - Note residual risks such as missing end-to-end coverage, untested migrations, or environment-specific behavior.
 
 Do not bury critical bugs under a long changelog.
+

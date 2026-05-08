@@ -2,7 +2,7 @@
 name: repo-onboarding
 description: Understand an unfamiliar repository quickly by mapping entry points, runtime boundaries, build/test commands, and the files that actually control behavior.
 metadata:
-  openclaw:
+  claude:
     capabilities:
       fs_read: true
       exec: true
@@ -36,3 +36,4 @@ Produce a compact mental model that names:
 - the biggest risks or unknowns
 
 Do not start broad refactors until this map is coherent.
+

@@ -209,7 +209,7 @@
                   ],
                   "supports_lazy_load": true,
                   "docs": {
-                    "summary": "BlueBubbles compatibility channel for OpenClaw-style routing.",
+                    "summary": "BlueBubbles compatibility channel for local routing.",
                     "help": "Registers BlueBubbles with alias resolution, local-first config, and lazy runtime activation.",
                     "docs_url": null,
                     "aliases": []
@@ -426,7 +426,7 @@
                   ],
                   "supports_lazy_load": true,
                   "docs": {
-                    "summary": "Feishu compatibility channel for OpenClaw-style routing.",
+                    "summary": "Feishu compatibility channel for local routing.",
                     "help": "Registers Feishu with alias resolution, local-first config, and lazy runtime activation.",
                     "docs_url": null,
                     "aliases": []
@@ -637,7 +637,7 @@
                   ],
                   "supports_lazy_load": true,
                   "docs": {
-                    "summary": "Google Chat compatibility channel for OpenClaw-style routing.",
+                    "summary": "Google Chat compatibility channel for local routing.",
                     "help": "Registers Google Chat with alias resolution, local-first config, and lazy runtime activation.",
                     "docs_url": null,
                     "aliases": []
@@ -931,7 +931,7 @@
                   ],
                   "supports_lazy_load": true,
                   "docs": {
-                    "summary": "iMessage compatibility channel for OpenClaw-style routing.",
+                    "summary": "iMessage compatibility channel for local routing.",
                     "help": "Registers iMessage with alias resolution, local-first config, and lazy runtime activation.",
                     "docs_url": null,
                     "aliases": []
@@ -1229,7 +1229,7 @@
                   ],
                   "supports_lazy_load": true,
                   "docs": {
-                    "summary": "LINE compatibility channel for OpenClaw-style routing.",
+                    "summary": "LINE compatibility channel for local routing.",
                     "help": "Registers LINE with alias resolution, local-first config, and lazy runtime activation.",
                     "docs_url": null,
                     "aliases": []
@@ -1443,7 +1443,7 @@
                   ],
                   "supports_lazy_load": true,
                   "docs": {
-                    "summary": "Mattermost compatibility channel for OpenClaw-style routing.",
+                    "summary": "Mattermost compatibility channel for local routing.",
                     "help": "Registers Mattermost with alias resolution, local-first config, and lazy runtime activation.",
                     "docs_url": null,
                     "aliases": []
@@ -1654,7 +1654,7 @@
                   ],
                   "supports_lazy_load": true,
                   "docs": {
-                    "summary": "Microsoft Teams compatibility channel for OpenClaw-style routing.",
+                    "summary": "Microsoft Teams compatibility channel for local routing.",
                     "help": "Registers Microsoft Teams with alias resolution, local-first config, and lazy runtime activation.",
                     "docs_url": null,
                     "aliases": []
@@ -1949,7 +1949,7 @@
                   ],
                   "supports_lazy_load": true,
                   "docs": {
-                    "summary": "Nextcloud Talk compatibility channel for OpenClaw-style routing.",
+                    "summary": "Nextcloud Talk compatibility channel for local routing.",
                     "help": "Registers Nextcloud Talk with alias resolution, local-first config, and lazy runtime activation.",
                     "docs_url": null,
                     "aliases": []
@@ -2247,7 +2247,7 @@
                   ],
                   "supports_lazy_load": true,
                   "docs": {
-                    "summary": "Nostr compatibility channel for OpenClaw-style routing.",
+                    "summary": "Nostr compatibility channel for local routing.",
                     "help": "Registers Nostr with alias resolution, local-first config, and lazy runtime activation.",
                     "docs_url": null,
                     "aliases": []
@@ -2545,7 +2545,7 @@
                   ],
                   "supports_lazy_load": true,
                   "docs": {
-                    "summary": "Signal compatibility channel for OpenClaw-style routing.",
+                    "summary": "Signal compatibility channel for local routing.",
                     "help": "Registers Signal with alias resolution, local-first config, and lazy runtime activation.",
                     "docs_url": null,
                     "aliases": []
@@ -2762,7 +2762,7 @@
                   ],
                   "supports_lazy_load": true,
                   "docs": {
-                    "summary": "Synology Chat compatibility channel for OpenClaw-style routing.",
+                    "summary": "Synology Chat compatibility channel for local routing.",
                     "help": "Registers Synology Chat with alias resolution, local-first config, and lazy runtime activation.",
                     "docs_url": null,
                     "aliases": []
@@ -3054,7 +3054,7 @@
                   ],
                   "supports_lazy_load": true,
                   "docs": {
-                    "summary": "Tlon compatibility channel for OpenClaw-style routing.",
+                    "summary": "Tlon compatibility channel for local routing.",
                     "help": "Registers Tlon with alias resolution, local-first config, and lazy runtime activation.",
                     "docs_url": null,
                     "aliases": []
@@ -3352,7 +3352,7 @@
                   ],
                   "supports_lazy_load": true,
                   "docs": {
-                    "summary": "Zalo compatibility channel for OpenClaw-style routing.",
+                    "summary": "Zalo compatibility channel for local routing.",
                     "help": "Registers Zalo with alias resolution, local-first config, and lazy runtime activation.",
                     "docs_url": null,
                     "aliases": []
@@ -3652,7 +3652,7 @@
                   ],
                   "supports_lazy_load": true,
                   "docs": {
-                    "summary": "Zalo User compatibility channel for OpenClaw-style routing.",
+                    "summary": "Zalo User compatibility channel for local routing.",
                     "help": "Registers Zalo User with alias resolution, local-first config, and lazy runtime activation.",
                     "docs_url": null,
                     "aliases": []
@@ -4268,3 +4268,4 @@
     "node scripts/release-gate/run-all.mjs"
   ]
 }
+

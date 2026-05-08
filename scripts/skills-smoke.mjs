@@ -191,7 +191,7 @@ async function main() {
 name: obsidian
 description: Obsidian workspace integration.
 metadata:
-  openclaw:
+  hermes:
     requires:
       bins:
         - obsidian
@@ -207,7 +207,7 @@ metadata:
 name: wacli
 description: WhatsApp CLI integration.
 metadata:
-  openclaw:
+  hermes:
     requires:
       bins:
         - wa-cli
@@ -223,7 +223,7 @@ metadata:
 name: gog
 description: GOG sync helper.
 metadata:
-  openclaw:
+  hermes:
     requires:
       anyBins:
         - stringer
@@ -239,7 +239,7 @@ metadata:
 name: github
 description: GitHub helper.
 metadata:
-  openclaw:
+  hermes:
     primaryEnv: GITHUB_TOKEN
     requires:
       bins:
@@ -258,7 +258,7 @@ metadata:
 name: weather
 description: Weather helper.
 metadata:
-  openclaw:
+  hermes:
     requires:
       bins:
         - curl
@@ -274,7 +274,7 @@ metadata:
 name: summarize
 description: Summaries.
 metadata:
-  openclaw:
+  hermes:
     primaryEnv: OPENAI_API_KEY
     requires:
       env:
@@ -293,7 +293,7 @@ metadata:
 name: artifact-install
 description: Download installer validation.
 metadata:
-  openclaw:
+  hermes:
     requires:
       bins:
         - artifact-install-fixture
@@ -316,7 +316,7 @@ metadata:
 name: download-fail
 description: Download failure validation.
 metadata:
-  openclaw:
+  hermes:
     requires:
       bins:
         - never-download
@@ -337,7 +337,7 @@ metadata:
 name: manual-fail
 description: Manual install validation.
 metadata:
-  openclaw:
+  hermes:
     requires:
       bins:
         - never-manual
@@ -360,7 +360,7 @@ metadata:
 name: timeout-skill
 description: Timeout validation.
 metadata:
-  openclaw:
+  hermes:
     requires:
       bins:
         - never-timeout
@@ -600,3 +600,4 @@ main().catch((error) => {
   console.error(error);
   process.exitCode = 1;
 });
+

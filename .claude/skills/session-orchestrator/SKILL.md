@@ -2,7 +2,7 @@
 name: session-orchestrator
 description: Coordinate multi-step work by spawning focused local agent sessions, delegating isolated subtasks, and consolidating the results back into the current session.
 metadata:
-  openclaw:
+  claude:
     capabilities:
       fs_read: true
 ---
@@ -35,3 +35,4 @@ Use this skill when the task is large enough to benefit from parallel exploratio
 - Spawning sessions for small single-file changes.
 - Letting multiple sessions modify the same hot path at once.
 - Returning raw child transcripts when a synthesized conclusion is possible.
+

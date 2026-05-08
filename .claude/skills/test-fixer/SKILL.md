@@ -2,7 +2,7 @@
 name: test-fixer
 description: Reproduce failing tests or build errors, make the smallest defensible code fix, and rerun targeted verification until the issue is resolved.
 metadata:
-  openclaw:
+  claude:
     capabilities:
       fs_read: true
       fs_write: true
@@ -31,3 +31,4 @@ Use this skill when the user wants a failing test, build, or verification step f
 ## Deliverable
 
 Explain the root cause, the fix, what was rerun, and what still was not validated.
+

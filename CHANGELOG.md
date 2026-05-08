@@ -4,13 +4,10 @@ Todas as mudancas relevantes deste projeto serao documentadas aqui.
 
 ## [Unreleased] - 2026-03-07
 
-### feat(openclaw-compatible)
+### feat(agent-compat)
 
 - Endpoint unico `GET /agent/compat/report` com coverage, matrices, gaps e benchmark de contexto.
 - Config schema versionado (`schema_version: 2`) com migracao backward-compatible de configs legadas.
-- Suite E2E local `scripts/openclaw-compat-smoke.mjs` cobrindo onboarding, channels, plugins, skills, tools profile e agent loop.
-- Geracao automatica de `docs/openclaw-compat-report.json` e `docs/openclaw-compat-report.md`.
-- Guia operacional dedicado em `docs/openclaw-compatible-mode.md`.
 
 ### compat
 

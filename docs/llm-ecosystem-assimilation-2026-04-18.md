@@ -10,7 +10,6 @@
 - `Ollama`: https://github.com/ollama/ollama
 - `Ollama tool calling`: https://docs.ollama.com/capabilities/tool-calling
 - `Ollama streaming`: https://docs.ollama.com/capabilities/streaming
-- `OpenClaw`: https://github.com/openclaw/openclaw
 
 ## External Patterns Worth Absorbing
 
@@ -67,20 +66,6 @@ Assimilacao para MLX-Pilot:
 - MUST HAVE: doctor/preflight de runtime
 - MUST HAVE: inventario de modelos locais mais claro
 - NICE TO HAVE: camada de model lifecycle interna inspirada em `ls/ps/stop/show`
-
-### OpenClaw
-
-Observed patterns:
-- sandbox mode por sessao
-- tools de sessao para coordenação entre agentes
-- skill registry/control plane local
-- postura explicita de seguranca para tools host-level
-
-Assimilacao para MLX-Pilot:
-- MUST HAVE: isolamento claro para execucao local
-- MUST HAVE: rollback/checkpoint local para mutacoes
-- NICE TO HAVE: dominios de execucao mais amplos no scheduler
-- NICE TO HAVE: worktree/sandbox por sessao para tarefas de codigo mais agressivas
 
 ## Classification
 

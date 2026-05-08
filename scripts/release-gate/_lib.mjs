@@ -497,7 +497,7 @@ export async function seedReleaseGateSkills(skillsDir) {
 name: mock-install
 description: Mock install helper for release gate scripts.
 metadata:
-  openclaw:
+  hermes:
     requires:
       bins:
         - rg
@@ -514,7 +514,7 @@ metadata:
 name: summarize
 description: Summary helper.
 metadata:
-  openclaw:
+  hermes:
     primaryEnv: OPENAI_API_KEY
     requires:
       env:
@@ -682,3 +682,4 @@ export async function ensureHealthy(daemon) {
   });
   assert.equal(response.status, 200);
 }
+

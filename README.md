@@ -64,7 +64,7 @@ O repositorio e um workspace Rust com multiplas crates (core, providers e daemon
 - Agent loop completo em Rust com iteracao multi-turn e tool-calling.
 - Loader de skills compativel com `SKILL.md` (sem injetar corpo integral no prompt).
 - Prompt engineering adaptativo para modelos locais/remotos.
-- Compatibility Matrix automatizada para modo `OpenClaw-compatible`.
+- Compatibility Matrix automatizada para o agente Hermes.
 - API dedicada do agente:
 - `POST /agent/run`
 - `POST /agent/stream` (stub para streaming de eventos)
@@ -102,19 +102,9 @@ O repositorio e um workspace Rust com multiplas crates (core, providers e daemon
 - Control Plane completo para channels, plugins, skills, tools/policies, context/memory e runtime/health.
 - Chat do agente integrado ao fluxo principal do MLX-Pilot.
 
-### OpenClaw-Compatible Mode
+### Validacao do Agente
 
 - Estado atual validado por `GET /agent/compat/report`.
-- Relatorios gerados automaticamente em:
-- `docs/openclaw-compat-report.json`
-- `docs/openclaw-compat-report.md`
-- Guia operacional: `docs/openclaw-compatible-mode.md`
-- Smoke validation local:
-
-```bash
-node scripts/openclaw-compat-smoke.mjs
-```
-
 - UI smoke validations:
 
 ```bash
@@ -122,7 +112,7 @@ cd apps/desktop-ui
 npm run test:e2e:channels-smoke
 npm run test:e2e:skills-smoke
 npm run test:e2e:agent-control-plane
-npm run test:e2e:openclaw-compat
+npm run test:e2e:agent-workspace-ui
 ```
 
 ---
@@ -161,7 +151,6 @@ mlx-ollama-pilot/
 | `crates/providers/llamacpp` | Provider llama.cpp embutido. |
 | `crates/providers/ollama` | Provider Ollama. |
 | `crates/providers/http_llm_provider` | Provider HTTP generico (OpenAI-compatible/Anthropic). |
-| `crates/bench_agent` | Benchmark comparativo automatizado entre OpenClaw/NanoBot/Rust Agent. |
 | `crates/daemon` | Servidor HTTP principal. |
 | `apps/desktop-ui` | App desktop Tauri e frontend. |
 | `scripts` | Scripts de conveniencia (`run-desktop.sh`, `stop-daemon.sh`) para macOS/Linux. |
