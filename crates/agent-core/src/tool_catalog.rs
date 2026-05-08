@@ -149,6 +149,28 @@ pub struct EffectiveToolPolicy {
     pub entries: Vec<EffectiveToolPolicyEntry>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct ToolsetDelegationPolicy {
+    #[serde(default)]
+    pub max_depth: usize,
+    #[serde(default = "default_true")]
+    pub inherit_parent_policy: bool,
+    #[serde(default)]
+    pub allow_delegate_tool: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ToolsetProfile {
+    pub id: String,
+    pub description: String,
+    #[serde(default)]
+    pub enabled_tools: Vec<String>,
+    #[serde(default)]
+    pub capability_requirements: Vec<String>,
+    #[serde(default)]
+    pub delegation_policy: ToolsetDelegationPolicy,
+}
+
 pub fn tool_catalog() -> Vec<ToolCatalogEntry> {
     vec![
         entry(
@@ -266,6 +288,18 @@ pub fn tool_catalog() -> Vec<ToolCatalogEntry> {
             ],
         ),
         entry(
+            "toolsets_list",
+            ToolSection::Sessions,
+            ToolRisk::Low,
+            "Listar toolsets nomeados disponiveis para runs Hermes-inspired e delegacao.",
+            &[
+                ToolProfileName::Minimal,
+                ToolProfileName::Coding,
+                ToolProfileName::Messaging,
+                ToolProfileName::Full,
+            ],
+        ),
+        entry(
             "sessions_spawn",
             ToolSection::Sessions,
             ToolRisk::Medium,
@@ -300,6 +334,29 @@ pub fn tool_catalog() -> Vec<ToolCatalogEntry> {
             ],
         ),
         entry(
+            "session_search",
+            ToolSection::Sessions,
+            ToolRisk::Low,
+            "Pesquisar sessoes anteriores relevantes e reutilizar contexto entre conversas.",
+            &[
+                ToolProfileName::Minimal,
+                ToolProfileName::Coding,
+                ToolProfileName::Messaging,
+                ToolProfileName::Full,
+            ],
+        ),
+        entry(
+            "delegate_session",
+            ToolSection::Sessions,
+            ToolRisk::High,
+            "Executar uma subsessao delegada com contexto isolado e retornar apenas o resumo.",
+            &[
+                ToolProfileName::Coding,
+                ToolProfileName::Messaging,
+                ToolProfileName::Full,
+            ],
+        ),
+        entry(
             "memory_search",
             ToolSection::Memory,
             ToolRisk::Low,
@@ -318,6 +375,17 @@ pub fn tool_catalog() -> Vec<ToolCatalogEntry> {
             "Ler um artefato de memoria local pelo id.",
             &[
                 ToolProfileName::Minimal,
+                ToolProfileName::Coding,
+                ToolProfileName::Messaging,
+                ToolProfileName::Full,
+            ],
+        ),
+        entry(
+            "memory_write",
+            ToolSection::Memory,
+            ToolRisk::Medium,
+            "Persistir memoria local duravel para reuso em sessoes futuras.",
+            &[
                 ToolProfileName::Coding,
                 ToolProfileName::Messaging,
                 ToolProfileName::Full,
@@ -458,6 +526,84 @@ pub fn profile_tool_names(profile: ToolProfileName) -> BTreeSet<String> {
 
 pub fn catalog_entry(name: &str) -> Option<ToolCatalogEntry> {
     tool_catalog().into_iter().find(|entry| entry.name == name)
+}
+
+pub fn toolset_profiles() -> Vec<ToolsetProfile> {
+    vec![
+        ToolsetProfile {
+            id: "general".to_string(),
+            description:
+                "Balanced Hermes-inspired local agent toolset for coding and memory-aware sessions."
+                    .to_string(),
+            enabled_tools: profile_tool_names(ToolProfileName::Coding)
+                .into_iter()
+                .collect(),
+            capability_requirements: vec!["fs:read".to_string(), "fs:write".to_string()],
+            delegation_policy: ToolsetDelegationPolicy {
+                max_depth: 1,
+                inherit_parent_policy: true,
+                allow_delegate_tool: true,
+            },
+        },
+        ToolsetProfile {
+            id: "messaging".to_string(),
+            description: "Session, memory, and channel tools for communication-heavy agents."
+                .to_string(),
+            enabled_tools: profile_tool_names(ToolProfileName::Messaging)
+                .into_iter()
+                .collect(),
+            capability_requirements: vec!["network:http".to_string()],
+            delegation_policy: ToolsetDelegationPolicy {
+                max_depth: 1,
+                inherit_parent_policy: true,
+                allow_delegate_tool: true,
+            },
+        },
+        ToolsetProfile {
+            id: "full".to_string(),
+            description: "Full local tool access, subject to policy/capability enforcement."
+                .to_string(),
+            enabled_tools: profile_tool_names(ToolProfileName::Full)
+                .into_iter()
+                .collect(),
+            capability_requirements: vec![
+                "fs:read".to_string(),
+                "fs:write".to_string(),
+                "process:spawn".to_string(),
+            ],
+            delegation_policy: ToolsetDelegationPolicy {
+                max_depth: 1,
+                inherit_parent_policy: true,
+                allow_delegate_tool: true,
+            },
+        },
+        ToolsetProfile {
+            id: "safe_readonly".to_string(),
+            description: "Read-heavy toolset with memory/recall and no mutating filesystem tools."
+                .to_string(),
+            enabled_tools: profile_tool_names(ToolProfileName::Minimal)
+                .into_iter()
+                .chain(
+                    ["session_search", "memory_search", "memory_get"]
+                        .into_iter()
+                        .map(str::to_string),
+                )
+                .collect(),
+            capability_requirements: vec!["fs:read".to_string()],
+            delegation_policy: ToolsetDelegationPolicy {
+                max_depth: 0,
+                inherit_parent_policy: true,
+                allow_delegate_tool: false,
+            },
+        },
+    ]
+}
+
+pub fn toolset_profile(id: &str) -> Option<ToolsetProfile> {
+    let normalized = id.trim().to_ascii_lowercase();
+    toolset_profiles()
+        .into_iter()
+        .find(|toolset| toolset.id.eq_ignore_ascii_case(&normalized))
 }
 
 fn entry(

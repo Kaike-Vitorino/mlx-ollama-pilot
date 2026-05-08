@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 /// Raw YAML frontmatter as deserialized from a SKILL.md.
 ///
-/// This maps 1:1 to the YAML keys found in OpenClaw/NanoBot skill files.
+/// This maps 1:1 to the YAML keys found in supported skill files.
 #[derive(Debug, Clone, Deserialize)]
 pub struct RawFrontmatter {
     pub name: String,
@@ -26,7 +26,7 @@ pub struct RawFrontmatter {
     pub metadata: Option<serde_json::Value>,
 }
 
-/// Metadata block nested inside `metadata.openclaw` or `metadata.nanobot`.
+/// Metadata block nested inside supported compatibility namespaces.
 #[derive(Debug, Clone, Deserialize, Default)]
 pub struct CompatMetadata {
     #[serde(default)]
@@ -39,6 +39,10 @@ pub struct CompatMetadata {
     pub install: Vec<InstallSpec>,
     #[serde(default)]
     pub capabilities: Option<SkillCapabilities>,
+    #[serde(default)]
+    pub import_source: Option<String>,
+    #[serde(default)]
+    pub compatibility_notes: Vec<String>,
 }
 
 /// Requirements inside the compatibility metadata block.
@@ -61,6 +65,7 @@ pub struct ParsedSkill {
     pub frontmatter: RawFrontmatter,
     pub body: String,
     pub compat: CompatMetadata,
+    pub format: SkillFormat,
 }
 
 /// Parse the frontmatter + body from a SKILL.md string.
@@ -104,32 +109,37 @@ pub fn parse_frontmatter(content: &str) -> Result<ParsedSkill, ResolverError> {
             message: format!("invalid YAML frontmatter: {e}"),
         })?;
 
-    // Extract compatibility metadata (openclaw or nanobot).
-    let compat = extract_compat_metadata(&frontmatter.metadata);
+    // Extract compatibility metadata from supported agent ecosystems.
+    let (compat, format) = extract_compat_metadata(&frontmatter.metadata);
 
     Ok(ParsedSkill {
         frontmatter,
         body,
         compat,
+        format,
     })
 }
 
 /// Extract `CompatMetadata` from the `metadata` JSON value,
 /// checking compatibility keys used by the supported agent ecosystems.
-fn extract_compat_metadata(metadata: &Option<serde_json::Value>) -> CompatMetadata {
+fn extract_compat_metadata(metadata: &Option<serde_json::Value>) -> (CompatMetadata, SkillFormat) {
     let Some(meta) = metadata else {
-        return CompatMetadata::default();
+        return (CompatMetadata::default(), SkillFormat::Native);
     };
 
-    for key in &["openclaw", "nanobot", "claude", "codex"] {
+    for (key, format) in [
+        ("hermes", SkillFormat::HermesCompatible),
+        ("claude", SkillFormat::Claude),
+        ("codex", SkillFormat::Codex),
+    ] {
         if let Some(inner) = meta.get(key) {
             if let Ok(parsed) = serde_json::from_value::<CompatMetadata>(inner.clone()) {
-                return parsed;
+                return (parsed, format);
             }
         }
     }
 
-    CompatMetadata::default()
+    (CompatMetadata::default(), SkillFormat::Native)
 }
 
 /// Convert a [`ParsedSkill`] into a full [`SkillPackage`].
@@ -175,12 +185,90 @@ pub fn to_skill_package(
         file_path: file_path.to_path_buf(),
         base_dir,
         body,
+        format: parsed.format.clone(),
+        manifest_version: "1".to_string(),
+        references: collect_support_files(file_path, "references"),
+        scripts: collect_support_files(file_path, "scripts"),
+        templates: collect_support_files(file_path, "templates"),
+        assets: collect_support_files(file_path, "assets"),
+        routines: collect_routines(file_path),
+        workflow_bindings: collect_workflow_bindings(file_path),
         requires,
         capabilities: compat.capabilities.clone().unwrap_or_default(),
+        policy: SkillPolicy {
+            enabled_by_default: fm.always,
+            tags: Vec::new(),
+        },
         install: compat.install.clone(),
+        import_source: compat.import_source.clone(),
+        compatibility_notes: compat.compatibility_notes.clone(),
         sha256: None,
         trust_level,
     }
+}
+
+fn collect_support_files(file_path: &Path, folder_name: &str) -> Vec<PathBuf> {
+    let base_dir = file_path.parent().unwrap_or(Path::new("."));
+    let target = base_dir.join(folder_name);
+    collect_files_recursive(&target)
+}
+
+fn collect_routines(file_path: &Path) -> Vec<SkillRoutine> {
+    let base_dir = file_path.parent().unwrap_or(Path::new("."));
+    collect_files_recursive(&base_dir.join("routines"))
+        .into_iter()
+        .map(|path| SkillRoutine {
+            id: path
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .unwrap_or("routine")
+                .to_string(),
+            name: path
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .unwrap_or("routine")
+                .replace(['_', '-'], " "),
+            description: String::new(),
+            entrypoint: Some(path),
+        })
+        .collect()
+}
+
+fn collect_workflow_bindings(file_path: &Path) -> Vec<WorkflowBinding> {
+    let base_dir = file_path.parent().unwrap_or(Path::new("."));
+    collect_files_recursive(&base_dir.join("workflows"))
+        .into_iter()
+        .map(|path| WorkflowBinding {
+            id: path
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .unwrap_or("workflow")
+                .to_string(),
+            kind: path
+                .extension()
+                .and_then(|value| value.to_str())
+                .unwrap_or("file")
+                .to_string(),
+            target: path.display().to_string(),
+        })
+        .collect()
+}
+
+fn collect_files_recursive(root: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+    let mut files = Vec::new();
+    for entry in entries.filter_map(Result::ok) {
+        let path = entry.path();
+        if path.is_dir() {
+            files.extend(collect_files_recursive(&path));
+        } else if path.is_file() {
+            files.push(path);
+        }
+    }
+    files.sort();
+    files
 }
 
 /// Check if a skill passes OS filtering for the current platform.
@@ -206,7 +294,7 @@ pub fn check_skill_requirements(
     result
 }
 
-/// Get the current OS tag matching OpenClaw conventions.
+/// Get the current OS tag used by the skill compatibility metadata.
 pub fn current_os_tag() -> &'static str {
     if cfg!(target_os = "macos") {
         "macos"
@@ -339,7 +427,7 @@ mod tests {
 name: weather
 description: Get current weather and forecasts (no API key required).
 homepage: https://wttr.in/:help
-metadata: {"nanobot":{"emoji":"🌤️","requires":{"bins":["curl"]}}}
+metadata: {"hermes":{"emoji":"🌤️","requires":{"bins":["curl"]}}}
 ---
 
 # Weather
@@ -368,7 +456,7 @@ name: apple-notes
 description: macOS only skill.
 os:
   - macos
-metadata: {"openclaw":{"emoji":"📝","requires":{"bins":["osascript"]}}}
+metadata: {"hermes":{"emoji":"📝","requires":{"bins":["osascript"]}}}
 ---
 
 # Apple Notes
@@ -379,7 +467,7 @@ macOS only.
 name: github
 description: "GitHub operations via gh CLI."
 metadata:
-  openclaw:
+  hermes:
     emoji: "🐙"
     requires:
       bins:
@@ -401,7 +489,7 @@ Use the `gh` CLI.
 name: coding-agent
 description: "Delegate coding tasks."
 metadata:
-  openclaw:
+  hermes:
     emoji: "🧩"
     requires:
       anyBins:
@@ -417,7 +505,7 @@ metadata:
 name: admin-tool
 description: "Needs capabilities"
 metadata:
-  openclaw:
+  hermes:
     capabilities:
       fs_read: true
       fs_write: true
@@ -435,7 +523,7 @@ metadata:
 name: summarize
 description: "Needs env and config"
 metadata:
-  openclaw:
+  hermes:
     primaryEnv: OPENAI_API_KEY
     requires:
       env:
@@ -686,3 +774,5 @@ Run: `{baseDir}/scripts/run.sh`
         assert!(check.missing_config.is_empty());
     }
 }
+
+

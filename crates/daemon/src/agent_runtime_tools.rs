@@ -1,6 +1,7 @@
 use crate::channels::{ChannelService, MessageSendRequest};
 use mlx_agent_core::{
-    ContextBudgetTelemetry, MemoryStore, SessionMessage, SessionStore, ToolRegistry,
+    ContextBudgetTelemetry, DelegateTaskRequest, MemoryStore, SessionMessage, SessionStore,
+    ToolRegistry,
 };
 use mlx_agent_tools::{list_file_checkpoints, restore_file_checkpoint};
 use mlx_agent_tools::{ParamSchema, Tool, ToolContext, ToolError, ToolResult};
@@ -14,10 +15,21 @@ pub struct RuntimeToolServices {
     pub channels: Arc<ChannelService>,
     pub memory: Arc<MemoryStore>,
     pub budget_tracker: Arc<tokio::sync::RwLock<BTreeMap<String, ContextBudgetTelemetry>>>,
+    pub delegate_executor: Option<Arc<dyn DelegateSessionExecutor>>,
+}
+
+#[async_trait::async_trait]
+pub trait DelegateSessionExecutor: Send + Sync {
+    async fn execute(
+        &self,
+        request: DelegateTaskRequest,
+        ctx: &ToolContext,
+    ) -> Result<Value, String>;
 }
 
 pub fn register_runtime_tools(registry: &mut ToolRegistry, services: &RuntimeToolServices) {
     registry.register(Arc::new(MessageTool::new(services.channels.clone())));
+    registry.register(Arc::new(ToolsetsListTool::new()));
     registry.register(Arc::new(SessionsListTool::new(services.sessions.clone())));
     registry.register(Arc::new(SessionsHistoryTool::new(
         services.sessions.clone(),
@@ -28,10 +40,52 @@ pub fn register_runtime_tools(registry: &mut ToolRegistry, services: &RuntimeToo
         services.sessions.clone(),
         services.budget_tracker.clone(),
     )));
+    registry.register(Arc::new(SessionSearchTool::new(services.sessions.clone())));
     registry.register(Arc::new(MemorySearchTool::new(services.memory.clone())));
     registry.register(Arc::new(MemoryGetTool::new(services.memory.clone())));
+    registry.register(Arc::new(MemoryWriteTool::new(services.memory.clone())));
+    if let Some(executor) = services.delegate_executor.clone() {
+        registry.register(Arc::new(DelegateSessionTool::new(executor)));
+    }
     registry.register(Arc::new(CheckpointsListTool::new()));
     registry.register(Arc::new(CheckpointRestoreTool::new()));
+}
+
+struct ToolsetsListTool {
+    schema: ParamSchema,
+}
+
+impl ToolsetsListTool {
+    fn new() -> Self {
+        Self {
+            schema: json!({
+                "type": "object",
+                "properties": {}
+            }),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl Tool for ToolsetsListTool {
+    fn name(&self) -> &str {
+        "toolsets_list"
+    }
+
+    fn description(&self) -> &str {
+        "List named toolsets available for Hermes-inspired runs and delegation."
+    }
+
+    fn parameters(&self) -> &ParamSchema {
+        &self.schema
+    }
+
+    async fn execute(&self, _params: &Value, ctx: &ToolContext) -> Result<ToolResult, ToolError> {
+        if matches!(ctx.mode, mlx_agent_tools::ExecutionMode::Locked) {
+            return Err(ToolError::ModeRestriction { mode: ctx.mode });
+        }
+        Ok(ok_json(json!(mlx_agent_core::toolset_profiles())))
+    }
 }
 
 struct MessageTool {
@@ -318,11 +372,14 @@ impl Tool for SessionsSendTool {
             .append(
                 &session_id,
                 &SessionMessage {
-                    role,
+                    role: role.clone(),
                     content: message.clone(),
                     tool_call_id: None,
                     tool_name: None,
                     timestamp: chrono::Utc::now(),
+                    kind: role,
+                    content_json: None,
+                    metadata_json: None,
                 },
             )
             .await
@@ -395,6 +452,127 @@ impl Tool for SessionsStatusTool {
             "meta": meta,
             "budget": budget,
         })))
+    }
+}
+
+struct SessionSearchTool {
+    sessions: Arc<SessionStore>,
+    schema: ParamSchema,
+}
+
+impl SessionSearchTool {
+    fn new(sessions: Arc<SessionStore>) -> Self {
+        Self {
+            sessions,
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string" },
+                    "limit": { "type": "integer" }
+                },
+                "required": ["query"]
+            }),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl Tool for SessionSearchTool {
+    fn name(&self) -> &str {
+        "session_search"
+    }
+
+    fn description(&self) -> &str {
+        "Search related prior sessions from local persistent storage."
+    }
+
+    fn parameters(&self) -> &ParamSchema {
+        &self.schema
+    }
+
+    async fn execute(&self, params: &Value, ctx: &ToolContext) -> Result<ToolResult, ToolError> {
+        if matches!(ctx.mode, mlx_agent_tools::ExecutionMode::Locked) {
+            return Err(ToolError::ModeRestriction { mode: ctx.mode });
+        }
+        let query = required_string(params, "query")?;
+        let limit = params["limit"].as_u64().unwrap_or(6) as usize;
+        let results = self
+            .sessions
+            .search(&query, Some(&ctx.session_id), limit)
+            .await
+            .map_err(io_error)?;
+        Ok(ok_json(json!(results)))
+    }
+}
+
+struct DelegateSessionTool {
+    executor: Arc<dyn DelegateSessionExecutor>,
+    schema: ParamSchema,
+}
+
+impl DelegateSessionTool {
+    fn new(executor: Arc<dyn DelegateSessionExecutor>) -> Self {
+        Self {
+            executor,
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "prompt": { "type": "string" },
+                    "name": { "type": "string" },
+                    "max_iterations": { "type": "integer" },
+                    "toolset_id": { "type": "string" },
+                    "goal": { "type": "string" },
+                    "handoff_summary": { "type": "string" }
+                },
+                "required": ["prompt"]
+            }),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl Tool for DelegateSessionTool {
+    fn name(&self) -> &str {
+        "delegate_session"
+    }
+
+    fn description(&self) -> &str {
+        "Run a bounded child session with isolated context and return only its summary."
+    }
+
+    fn parameters(&self) -> &ParamSchema {
+        &self.schema
+    }
+
+    async fn execute(&self, params: &Value, ctx: &ToolContext) -> Result<ToolResult, ToolError> {
+        match ctx.mode {
+            mlx_agent_tools::ExecutionMode::Locked | mlx_agent_tools::ExecutionMode::ReadOnly => {
+                return Err(ToolError::ModeRestriction { mode: ctx.mode });
+            }
+            mlx_agent_tools::ExecutionMode::DryRun => {
+                return Ok(ok_text(
+                    "[DRY RUN] would run a delegated child session".to_string(),
+                ));
+            }
+            mlx_agent_tools::ExecutionMode::Full => {}
+        }
+
+        let request = DelegateTaskRequest {
+            prompt: required_string(params, "prompt")?,
+            name: optional_string(params, "name"),
+            max_iterations: params["max_iterations"]
+                .as_u64()
+                .map(|value| value as usize),
+            toolset_id: optional_string(params, "toolset_id"),
+            goal: optional_string(params, "goal"),
+            handoff_summary: optional_string(params, "handoff_summary"),
+        };
+        let result = self
+            .executor
+            .execute(request, ctx)
+            .await
+            .map_err(to_execution_error)?;
+        Ok(ok_json(result))
     }
 }
 
@@ -477,6 +655,37 @@ impl CheckpointsListTool {
                     "session_id": { "type": "string" },
                     "limit": { "type": "integer" }
                 }
+            }),
+        }
+    }
+}
+
+struct MemoryWriteTool {
+    memory: Arc<MemoryStore>,
+    schema: ParamSchema,
+}
+
+impl MemoryWriteTool {
+    fn new(memory: Arc<MemoryStore>) -> Self {
+        Self {
+            memory,
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "title": { "type": "string" },
+                    "content": { "type": "string" },
+                    "kind": { "type": "string" },
+                    "scope": { "type": "string" },
+                    "namespace": { "type": "string" },
+                    "importance": { "type": "integer" },
+                    "tags": {
+                        "oneOf": [
+                            { "type": "array", "items": { "type": "string" } },
+                            { "type": "string" }
+                        ]
+                    }
+                },
+                "required": ["title", "content"]
             }),
         }
     }
@@ -583,6 +792,84 @@ impl Tool for MemoryGetTool {
         let record = self.memory.get(&memory_id).await.map_err(io_error)?;
         Ok(ok_json(json!({
             "memory": record,
+        })))
+    }
+}
+
+#[async_trait::async_trait]
+impl Tool for MemoryWriteTool {
+    fn name(&self) -> &str {
+        "memory_write"
+    }
+
+    fn description(&self) -> &str {
+        "Write a durable local memory record for future sessions."
+    }
+
+    fn parameters(&self) -> &ParamSchema {
+        &self.schema
+    }
+
+    async fn execute(&self, params: &Value, ctx: &ToolContext) -> Result<ToolResult, ToolError> {
+        match ctx.mode {
+            mlx_agent_tools::ExecutionMode::Locked | mlx_agent_tools::ExecutionMode::ReadOnly => {
+                return Err(ToolError::ModeRestriction { mode: ctx.mode });
+            }
+            mlx_agent_tools::ExecutionMode::DryRun => {
+                return Ok(ok_text(
+                    "[DRY RUN] would write a durable memory record".to_string(),
+                ));
+            }
+            mlx_agent_tools::ExecutionMode::Full => {}
+        }
+
+        let title = required_string(params, "title")?;
+        let content = required_string(params, "content")?;
+        let kind = optional_string(params, "kind").unwrap_or_else(|| "note".to_string());
+        let scope = optional_string(params, "scope").unwrap_or_else(|| "long_term".to_string());
+        let namespace =
+            optional_string(params, "namespace").unwrap_or_else(|| "default".to_string());
+        let importance = params["importance"].as_i64().unwrap_or(0) as i32;
+        let tags = match params.get("tags") {
+            Some(Value::Array(values)) => values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+            Some(Value::String(raw)) => raw
+                .split(',')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+            _ => Vec::new(),
+        };
+        let memory_id = uuid::Uuid::new_v4().to_string();
+        let record = mlx_agent_core::MemoryRecord {
+            id: memory_id.clone(),
+            session_id: ctx.session_id.clone(),
+            source_session_id: ctx.session_id.clone(),
+            scope,
+            namespace,
+            kind,
+            title,
+            content,
+            tags,
+            created_at: chrono::Utc::now(),
+            metadata: BTreeMap::new(),
+            importance,
+            last_accessed_at: Some(chrono::Utc::now()),
+            pin_state: "manual".to_string(),
+            promotion_source: "memory_write_tool".to_string(),
+            summary_ref: ctx.session_id.clone(),
+        };
+        self.memory.upsert(&[record]).await.map_err(io_error)?;
+
+        Ok(ok_json(json!({
+            "memory_id": memory_id,
+            "stored": true,
         })))
     }
 }

@@ -49,7 +49,7 @@ impl PluginManager {
     pub(crate) fn new(settings_path: PathBuf) -> Self {
         Self {
             settings_path,
-            registry: PluginRegistry::openclaw_compat(),
+            registry: PluginRegistry::compatibility_catalog(),
             runtime: Mutex::new(LazyRuntimeRegistry::new()),
         }
     }

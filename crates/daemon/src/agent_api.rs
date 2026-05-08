@@ -19,12 +19,15 @@ use mlx_agent_core::capabilities::{
 use mlx_agent_core::events::{AgentEvent, EventBus};
 use mlx_agent_core::policy::{DefaultPolicyEngine, PolicyConfig, PolicyEngine};
 use mlx_agent_core::registry::ToolRegistry;
-use mlx_agent_core::{AgentError, AgentLoop, AgentLoopConfig};
+use mlx_agent_core::{
+    AgentError, AgentLoop, AgentLoopConfig, AgentRuntime, AgentRuntimeConfig, RuntimeVariant,
+};
 use mlx_agent_tools::ExecutionMode;
 use mlx_ollama_core::{
     ChatMessage, FunctionDef, MessageRole, ModelProvider, RuntimeProviderConfig,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -105,12 +108,42 @@ pub struct AgentRunRequest {
     /// Enables one short fallback reprompt for tool-call JSON.
     #[serde(default)]
     pub enable_tool_call_fallback: Option<bool>,
+    /// Runtime variant: classic | hermes_inspired.
+    #[serde(default)]
+    pub runtime_variant: Option<String>,
+    /// Persist structured tool events in the session store.
+    #[serde(default)]
+    pub persist_tool_events: Option<bool>,
+    /// Enable cross-session recall in Hermes-inspired runtime.
+    #[serde(default)]
+    pub session_search_enabled: Option<bool>,
+    /// Memory hydration profile: minimal | balanced | full.
+    #[serde(default)]
+    pub memory_profile: Option<String>,
+    /// Snapshot persistence mode for Hermes-inspired memory lifecycle.
+    #[serde(default)]
+    pub memory_snapshot_mode: Option<String>,
+    /// Optional parent/delegation/session context envelope.
+    #[serde(default)]
+    pub session_context: Option<mlx_agent_core::SessionContextEnvelope>,
+    /// Optional gateway metadata merged into the session context envelope.
+    #[serde(default)]
+    pub gateway_context: Option<mlx_agent_core::GatewayContext>,
+    /// Current delegation depth for nested runs.
+    #[serde(default)]
+    pub delegate_depth: Option<usize>,
     /// Optional enabled skills.
     #[serde(default)]
     pub enabled_skills: Option<Vec<String>>,
     /// Optional enabled tools.
     #[serde(default)]
     pub enabled_tools: Option<Vec<String>>,
+    /// Optional named toolset to constrain runtime tools for this request.
+    #[serde(default)]
+    pub toolset_id: Option<String>,
+    /// Optional provider profile id to resolve local/remote provider settings.
+    #[serde(default)]
+    pub provider_profile_id: Option<String>,
     /// Workspace root override.
     #[serde(default)]
     pub workspace_root: Option<String>,
@@ -883,6 +916,134 @@ fn build_tool_policy_state(
     }
 }
 
+fn selected_toolset_id(
+    agent_cfg: &super::config::AgentUiConfig,
+    request: &AgentRunRequest,
+) -> String {
+    request
+        .toolset_id
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(agent_cfg.default_toolset_id.as_str())
+        .trim()
+        .to_string()
+}
+
+fn resolve_toolset_profile(
+    agent_cfg: &super::config::AgentUiConfig,
+    request: &AgentRunRequest,
+) -> mlx_agent_core::ToolsetProfile {
+    mlx_agent_core::toolset_profile(&selected_toolset_id(agent_cfg, request)).unwrap_or_else(|| {
+        mlx_agent_core::toolset_profile("general")
+            .unwrap_or_else(|| mlx_agent_core::toolset_profiles()[0].clone())
+    })
+}
+
+fn allowed_tool_subset(
+    agent_cfg: &super::config::AgentUiConfig,
+    request: &AgentRunRequest,
+    toolset: &mlx_agent_core::ToolsetProfile,
+) -> BTreeSet<String> {
+    let mut allowed = toolset
+        .enabled_tools
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let config_allowed = effective_enabled_tools(agent_cfg)
+        .into_iter()
+        .map(str::to_string)
+        .collect::<BTreeSet<_>>();
+    allowed = allowed
+        .intersection(&config_allowed)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+
+    if let Some(requested) = request
+        .enabled_tools
+        .as_ref()
+        .filter(|items| !items.is_empty())
+    {
+        let requested = requested.iter().cloned().collect::<BTreeSet<_>>();
+        allowed = allowed.intersection(&requested).cloned().collect();
+    }
+
+    allowed
+}
+
+fn resolve_provider_profile<'a>(
+    agent_cfg: &'a super::config::AgentUiConfig,
+    request: &AgentRunRequest,
+) -> Option<&'a super::config::AgentProviderProfileConfig> {
+    let selected = request
+        .provider_profile_id
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            if agent_cfg.provider_profile_id.trim().is_empty() {
+                None
+            } else {
+                Some(agent_cfg.provider_profile_id.as_str())
+            }
+        })?;
+
+    agent_cfg
+        .provider_profiles
+        .iter()
+        .find(|profile| profile.id.eq_ignore_ascii_case(selected))
+}
+
+fn merged_session_context(
+    request: &AgentRunRequest,
+) -> Option<mlx_agent_core::SessionContextEnvelope> {
+    let mut context = request.session_context.clone().unwrap_or_default();
+    if let Some(gateway) = request.gateway_context.as_ref() {
+        if context.source_channel.trim().is_empty() {
+            context.source_channel = gateway.source_channel.clone();
+        }
+        if context.thread_id.trim().is_empty() {
+            context.thread_id = gateway.thread_id.clone();
+        }
+        if context.sender_id.trim().is_empty() {
+            context.sender_id = gateway.sender_id.clone();
+        }
+        if context.correlation_id.trim().is_empty() {
+            context.correlation_id = gateway.correlation_id.clone();
+        }
+    }
+
+    if context.origin_kind.trim().is_empty()
+        && context.parent_session_id.is_none()
+        && context.metadata.is_empty()
+        && context.source_channel.trim().is_empty()
+        && context.thread_id.trim().is_empty()
+        && context.sender_id.trim().is_empty()
+        && context.correlation_id.trim().is_empty()
+    {
+        None
+    } else {
+        Some(context)
+    }
+}
+
+fn build_delegate_system_prompt(
+    goal: Option<&str>,
+    handoff_summary: Option<&str>,
+    toolset_id: &str,
+) -> String {
+    let mut lines = vec![
+        "You are a delegated MLX-Pilot subagent.".to_string(),
+        format!("Use only the active toolset: {toolset_id}."),
+        "Return a concise completion summary for the parent session.".to_string(),
+    ];
+    if let Some(goal) = goal.filter(|value| !value.trim().is_empty()) {
+        lines.push(format!("Goal: {}", goal.trim()));
+    }
+    if let Some(summary) = handoff_summary.filter(|value| !value.trim().is_empty()) {
+        lines.push(format!("Parent handoff: {}", summary.trim()));
+    }
+    lines.join("\n")
+}
+
 fn sync_legacy_enabled_tools(agent_cfg: &mut super::config::AgentUiConfig) {
     let effective = mlx_agent_core::resolve_effective_tool_policy(
         &build_tool_policy_state(agent_cfg, None, None),
@@ -902,6 +1063,12 @@ fn session_messages_to_chat_history(
 ) -> Vec<mlx_ollama_core::ChatMessage> {
     messages
         .iter()
+        .filter(|message| {
+            matches!(
+                message.kind.trim().to_ascii_lowercase().as_str(),
+                "user" | "assistant" | "tool_result" | "message"
+            )
+        })
         .map(|message| {
             let role = match message.role.trim().to_ascii_lowercase().as_str() {
                 "system" => mlx_ollama_core::MessageRole::System,
@@ -928,6 +1095,9 @@ fn summary_artifact_to_memory_record(
     mlx_agent_core::MemoryRecord {
         id: artifact.id.clone(),
         session_id: artifact.session_id.clone(),
+        source_session_id: artifact.session_id.clone(),
+        scope: "session".to_string(),
+        namespace: "history".to_string(),
         kind: artifact
             .metadata
             .get("kind")
@@ -935,8 +1105,14 @@ fn summary_artifact_to_memory_record(
             .unwrap_or_else(|| "history_summary".to_string()),
         title: artifact.title.clone(),
         content: artifact.content.clone(),
+        tags: Vec::new(),
         created_at: artifact.created_at,
         metadata: artifact.metadata.clone(),
+        importance: 25,
+        last_accessed_at: Some(chrono::Utc::now()),
+        pin_state: "auto".to_string(),
+        promotion_source: "summary_artifact".to_string(),
+        summary_ref: artifact.session_id.clone(),
     }
 }
 
@@ -965,6 +1141,30 @@ fn merge_rules(
     deny_target.dedup();
 }
 
+fn parse_runtime_variant(value: Option<&str>) -> RuntimeVariant {
+    match value
+        .map(str::trim)
+        .unwrap_or("classic")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "hermes" | "hermes_inspired" | "hermes-inspired" => RuntimeVariant::HermesInspired,
+        _ => RuntimeVariant::Classic,
+    }
+}
+
+fn parse_memory_snapshot_mode(value: Option<&str>) -> mlx_agent_core::MemorySnapshotMode {
+    match value
+        .map(str::trim)
+        .unwrap_or("session")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "off" | "disabled" => mlx_agent_core::MemorySnapshotMode::Off,
+        _ => mlx_agent_core::MemorySnapshotMode::Session,
+    }
+}
+
 fn build_policy_config(
     cfg: &super::config::AgentUiConfig,
     mode: ExecutionMode,
@@ -972,6 +1172,7 @@ fn build_policy_config(
     known_skill_hashes: BTreeMap<String, String>,
     tool_policy: mlx_agent_core::ToolPolicyState,
     session_id: Option<&str>,
+    allowed_tool_subset: BTreeSet<String>,
 ) -> PolicyConfig {
     let security_mode = cfg.security.security_mode.trim().to_ascii_lowercase();
     let paranoid_mode = security_mode == "paranoid";
@@ -1002,6 +1203,7 @@ fn build_policy_config(
         tool_policy,
         agent_id: DEFAULT_AGENT_ID.to_string(),
         session_id: session_id.map(normalize_scope_key),
+        allowed_tool_subset,
     }
 }
 
@@ -1410,6 +1612,7 @@ async fn load_skill_catalog(
         known_skill_hashes,
         tool_policy,
         None,
+        BTreeSet::new(),
     );
     let policy = DefaultPolicyEngine::new(policy_cfg);
     let packages = discovered
@@ -1670,26 +1873,14 @@ async fn persist_agent_exchange(
         .session_store
         .append(
             session_id,
-            &mlx_agent_core::session::SessionMessage {
-                role: "user".to_string(),
-                content: user_message.to_string(),
-                tool_call_id: None,
-                tool_name: None,
-                timestamp: chrono::Utc::now(),
-            },
+            &mlx_agent_core::session::SessionMessage::user(user_message.to_string()),
         )
         .await;
     let _ = state
         .session_store
         .append(
             session_id,
-            &mlx_agent_core::session::SessionMessage {
-                role: "assistant".to_string(),
-                content: assistant_message.to_string(),
-                tool_call_id: None,
-                tool_name: None,
-                timestamp: chrono::Utc::now(),
-            },
+            &mlx_agent_core::session::SessionMessage::assistant(assistant_message.to_string()),
         )
         .await;
 }
@@ -1708,12 +1899,18 @@ async fn build_capability_inventory_snapshot(
         Some(session_id),
         request.enabled_tools.as_deref(),
     );
+    let toolset = resolve_toolset_profile(agent_cfg, request);
+    let allowed_subset = allowed_tool_subset(agent_cfg, request, &toolset);
     let effective_tools =
         mlx_agent_core::resolve_effective_tool_policy(&policy, DEFAULT_AGENT_ID, Some(session_id));
     let mut tools = effective_tools
         .entries
         .into_iter()
-        .filter(|entry| entry.allowed && entry.implemented)
+        .filter(|entry| {
+            entry.allowed
+                && entry.implemented
+                && (allowed_subset.is_empty() || allowed_subset.contains(&entry.name))
+        })
         .map(|entry| (entry.name, entry.description))
         .collect::<Vec<_>>();
     tools.sort_by(|left, right| left.0.cmp(&right.0));
@@ -1909,7 +2106,7 @@ fn synthetic_context_messages() -> Vec<ChatMessage> {
         messages.push(ChatMessage::text(
             MessageRole::User,
             format!(
-                "Iteracao {index}: revisar onboarding OpenClaw-compatible mode, mapear gaps de channel/plugin/skill/tool e manter um resumo objetivo do estado do sistema."
+                "Iteracao {index}: revisar onboarding do agente Hermes, mapear gaps de channel/plugin/skill/tool e manter um resumo objetivo do estado do sistema."
             ),
         ));
         messages.push(ChatMessage::text(
@@ -2502,6 +2699,146 @@ struct ResolvedProvider {
     runtime: Option<RuntimeProviderConfig>,
 }
 
+#[derive(Clone)]
+struct DelegateExecutor {
+    state: super::AppState,
+    agent_cfg: super::config::AgentUiConfig,
+    resolved: ResolvedProvider,
+    workspace: PathBuf,
+    runtime_variant: RuntimeVariant,
+    persist_tool_events: bool,
+    session_search_enabled: bool,
+    memory_profile: String,
+    memory_snapshot_mode: String,
+    delegate_depth: usize,
+    enabled_tools: Vec<String>,
+    toolset_id: String,
+}
+
+#[async_trait::async_trait]
+impl crate::agent_runtime_tools::DelegateSessionExecutor for DelegateExecutor {
+    async fn execute(
+        &self,
+        request: mlx_agent_core::DelegateTaskRequest,
+        ctx: &mlx_agent_tools::ToolContext,
+    ) -> Result<serde_json::Value, String> {
+        if self.delegate_depth >= 1 {
+            return Err(
+                "delegate depth exceeded (grandchildren are disabled in this cycle)".to_string(),
+            );
+        }
+
+        let child_request = AgentRunRequest {
+            session_id: Some(mlx_agent_core::SessionStore::new_session_id()),
+            message: request.prompt,
+            provider: Some(self.resolved.provider_name.clone()),
+            model_id: Some(self.resolved.model_id.clone()),
+            api_key: None,
+            base_url: self
+                .resolved
+                .runtime
+                .as_ref()
+                .and_then(|runtime| runtime.base_url.clone()),
+            custom_headers: self
+                .resolved
+                .runtime
+                .as_ref()
+                .map(|runtime| runtime.headers.clone()),
+            streaming: Some(false),
+            fallback_enabled: Some(false),
+            fallback_provider: None,
+            fallback_model_id: None,
+            execution_mode: Some("full".to_string()),
+            approval_mode: Some(self.agent_cfg.approval_mode.clone()),
+            system_prompt: Some(build_delegate_system_prompt(
+                request.goal.as_deref(),
+                request.handoff_summary.as_deref(),
+                request
+                    .toolset_id
+                    .as_deref()
+                    .unwrap_or(self.toolset_id.as_str()),
+            )),
+            max_iterations: request.max_iterations.or(Some(16)),
+            max_prompt_tokens: self.agent_cfg.max_prompt_tokens,
+            max_history_messages: self.agent_cfg.max_history_messages,
+            max_tools_in_prompt: self.agent_cfg.max_tools_in_prompt,
+            temperature: self.agent_cfg.temperature,
+            aggressive_tool_filtering: Some(self.agent_cfg.aggressive_tool_filtering),
+            enable_tool_call_fallback: Some(self.agent_cfg.enable_tool_call_fallback),
+            runtime_variant: Some(match self.runtime_variant {
+                RuntimeVariant::HermesInspired => "hermes_inspired".to_string(),
+                RuntimeVariant::Classic => "classic".to_string(),
+            }),
+            persist_tool_events: Some(self.persist_tool_events),
+            session_search_enabled: Some(self.session_search_enabled),
+            memory_profile: Some(self.memory_profile.clone()),
+            memory_snapshot_mode: Some(self.memory_snapshot_mode.clone()),
+            session_context: Some(mlx_agent_core::SessionContextEnvelope {
+                origin_kind: "delegated".to_string(),
+                parent_session_id: Some(ctx.session_id.clone()),
+                source_channel: String::new(),
+                thread_id: String::new(),
+                sender_id: String::new(),
+                correlation_id: String::new(),
+                metadata: BTreeMap::from([(
+                    "workspace".to_string(),
+                    ctx.workspace_root.display().to_string(),
+                )]),
+            }),
+            gateway_context: None,
+            delegate_depth: Some(self.delegate_depth + 1),
+            enabled_skills: None,
+            enabled_tools: Some(
+                self.enabled_tools
+                    .iter()
+                    .filter(|tool| tool.as_str() != "delegate_session")
+                    .cloned()
+                    .collect(),
+            ),
+            toolset_id: Some(
+                request
+                    .toolset_id
+                    .clone()
+                    .unwrap_or_else(|| self.toolset_id.clone()),
+            ),
+            provider_profile_id: None,
+            workspace_root: Some(self.workspace.display().to_string()),
+        };
+
+        let response = run_agent_once(
+            &self.state,
+            &self.agent_cfg,
+            &child_request,
+            self.resolved.clone(),
+            self.workspace.clone(),
+        )
+        .await
+        .map_err(|error| error.details.unwrap_or(error.error))?;
+
+        self.state
+            .agent_state
+            .event_bus
+            .emit(AgentEvent::SessionHandoff {
+                parent_session_id: ctx.session_id.clone(),
+                child_session_id: response.session_id.clone(),
+                handoff_summary: request
+                    .handoff_summary
+                    .clone()
+                    .unwrap_or_else(|| response.content.clone()),
+            });
+
+        Ok(json!({
+            "session_id": response.session_id,
+            "summary": response.content,
+            "provider": response.provider,
+            "model_id": response.model_id,
+            "iterations": response.iterations,
+            "tool_calls_made": response.tool_calls_made,
+            "toolset_id": request.toolset_id.unwrap_or_else(|| self.toolset_id.clone()),
+        }))
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct AgentProviderRegistry;
 
@@ -2553,7 +2890,7 @@ fn resolve_provider(
             provider_name: "ollama".to_string(),
             model_id: model.to_string(),
             provider: state.ollama_provider.clone(),
-            runtime: None,
+            runtime,
         }),
         "anthropic" => {
             let provider = HttpLlmProvider::new(HttpLlmProviderConfig {
@@ -2726,15 +3063,61 @@ fn build_tool_registry(
     state: &super::AppState,
     agent_cfg: &super::config::AgentUiConfig,
     workspace_root: &Path,
+    resolved: &ResolvedProvider,
+    request: &AgentRunRequest,
+    allowed_tools: &BTreeSet<String>,
+    toolset: &mlx_agent_core::ToolsetProfile,
 ) -> Result<ToolRegistry, AgentApiError> {
-    use mlx_agent_tools::{EditFileTool, ExecTool, ListDirTool, ReadFileTool, WriteFileTool};
+    use mlx_agent_tools::{
+        EditFileTool, ExecTool, GlobTool, GrepTool, ListDirTool, ReadFileTool, WriteFileTool,
+    };
 
     let mut registry = ToolRegistry::new();
     registry.register(Arc::new(ReadFileTool::new()));
     registry.register(Arc::new(WriteFileTool::new()));
     registry.register(Arc::new(EditFileTool::new()));
     registry.register(Arc::new(ListDirTool::new()));
+    registry.register(Arc::new(GlobTool::new()));
+    registry.register(Arc::new(GrepTool::new()));
     registry.register(Arc::new(ExecTool::new()));
+
+    let runtime_variant = parse_runtime_variant(
+        request
+            .runtime_variant
+            .as_deref()
+            .or(Some(agent_cfg.runtime_variant.as_str())),
+    );
+    let delegate_executor = if runtime_variant == RuntimeVariant::HermesInspired {
+        Some(Arc::new(DelegateExecutor {
+            state: state.clone(),
+            agent_cfg: agent_cfg.clone(),
+            resolved: resolved.clone(),
+            workspace: workspace_root.to_path_buf(),
+            runtime_variant,
+            persist_tool_events: request
+                .persist_tool_events
+                .unwrap_or(agent_cfg.persist_tool_events),
+            session_search_enabled: request
+                .session_search_enabled
+                .unwrap_or(agent_cfg.session_search_enabled),
+            memory_profile: request
+                .memory_profile
+                .clone()
+                .unwrap_or_else(|| agent_cfg.memory_profile.clone()),
+            memory_snapshot_mode: request
+                .memory_snapshot_mode
+                .clone()
+                .unwrap_or_else(|| agent_cfg.memory_snapshot_mode.clone()),
+            delegate_depth: request.delegate_depth.unwrap_or(0),
+            enabled_tools: allowed_tools.iter().cloned().collect(),
+            toolset_id: toolset.id.clone(),
+        })
+            as Arc<
+                dyn crate::agent_runtime_tools::DelegateSessionExecutor,
+            >)
+    } else {
+        None
+    };
 
     crate::agent_runtime_tools::register_runtime_tools(
         &mut registry,
@@ -2743,8 +3126,11 @@ fn build_tool_registry(
             channels: state.channel_service.clone(),
             memory: state.agent_state.memory.clone(),
             budget_tracker: state.agent_state.budget_tracker.clone(),
+            delegate_executor,
         },
     );
+
+    registry.retain(|name| allowed_tools.contains(name));
 
     if agent_cfg.security.require_capabilities {
         let mut authority = CapabilityAuthority::new();
@@ -2938,6 +3324,16 @@ async fn run_agent_once(
         .session_id
         .clone()
         .unwrap_or_else(mlx_agent_core::SessionStore::new_session_id);
+    let provider_profile = resolve_provider_profile(agent_cfg, request).cloned();
+    let runtime_variant = parse_runtime_variant(
+        request
+            .runtime_variant
+            .as_deref()
+            .or(provider_profile
+                .as_ref()
+                .map(|profile| profile.runtime_variant.as_str()))
+            .or(Some(agent_cfg.runtime_variant.as_str())),
+    );
 
     let mode = parse_execution_mode(
         request
@@ -2960,6 +3356,9 @@ async fn run_agent_once(
         Some(&session_id),
         request.enabled_tools.as_deref(),
     );
+    let toolset = resolve_toolset_profile(agent_cfg, request);
+    let allowed_tools = allowed_tool_subset(agent_cfg, request, &toolset);
+    let session_context = merged_session_context(request);
     let policy_config = build_policy_config(
         agent_cfg,
         mode,
@@ -2967,10 +3366,19 @@ async fn run_agent_once(
         known_skill_hashes,
         tool_policy,
         Some(&session_id),
+        allowed_tools.clone(),
     );
     let policy: Arc<dyn PolicyEngine> = Arc::new(DefaultPolicyEngine::new(policy_config));
 
-    let tool_registry = build_tool_registry(state, &agent_cfg, &workspace)?;
+    let tool_registry = build_tool_registry(
+        state,
+        &agent_cfg,
+        &workspace,
+        &resolved,
+        request,
+        &allowed_tools,
+        &toolset,
+    )?;
 
     let mut skill_runtime = mlx_agent_core::runtime::SkillRuntime::new();
     let skill_context = build_skill_requirement_context(agent_cfg)?;
@@ -2995,7 +3403,7 @@ async fn run_agent_once(
             .collect()
     };
 
-    let config = AgentLoopConfig {
+    let loop_config = AgentLoopConfig {
         session_id: session_id.clone(),
         model_id: resolved.model_id.clone(),
         workspace_root: workspace.clone(),
@@ -3038,51 +3446,126 @@ async fn run_agent_once(
         "starting agent run"
     );
 
-    let _ = state.session_store.ensure_session(&session_id, None).await;
-
-    let mut agent = AgentLoop::new(
-        config,
-        resolved.provider,
-        tool_registry,
-        skill_runtime,
-        policy,
-        state.agent_state.approval.clone(),
-        state.agent_state.event_bus.clone(),
-        state.agent_state.audit.clone(),
-    );
-
-    let response = agent
-        .run(request.message.trim())
-        .await
-        .map_err(AgentApiError::from_agent_error)?;
-
     let _ = state
         .session_store
-        .append(
-            &session_id,
-            &mlx_agent_core::session::SessionMessage {
-                role: "user".to_string(),
-                content: request.message.clone(),
-                tool_call_id: None,
-                tool_name: None,
-                timestamp: chrono::Utc::now(),
-            },
-        )
+        .ensure_session_with_meta(mlx_agent_core::session::SessionMeta {
+            id: session_id.clone(),
+            name: "Nova conversa".to_string(),
+            updated_at: chrono::Utc::now(),
+            last_activity_at: chrono::Utc::now(),
+            message_count: 0,
+            provider_id: resolved.provider_name.clone(),
+            model_id: resolved.model_id.clone(),
+            workspace_root: workspace.display().to_string(),
+            origin_kind: session_context
+                .as_ref()
+                .map(|context| context.origin_kind.clone())
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| "local".to_string()),
+            parent_session_id: session_context
+                .as_ref()
+                .and_then(|context| context.parent_session_id.clone()),
+            status: "active".to_string(),
+            created_at: chrono::Utc::now(),
+            summary: String::new(),
+            source_channel: session_context
+                .as_ref()
+                .map(|context| context.source_channel.clone())
+                .unwrap_or_default(),
+            thread_id: session_context
+                .as_ref()
+                .map(|context| context.thread_id.clone())
+                .unwrap_or_default(),
+            correlation_id: session_context
+                .as_ref()
+                .map(|context| context.correlation_id.clone())
+                .unwrap_or_default(),
+        })
         .await;
 
-    let _ = state
-        .session_store
-        .append(
-            &session_id,
-            &mlx_agent_core::session::SessionMessage {
-                role: "assistant".to_string(),
-                content: response.content.clone(),
-                tool_call_id: None,
-                tool_name: None,
-                timestamp: chrono::Utc::now(),
-            },
-        )
-        .await;
+    let response = match runtime_variant {
+        RuntimeVariant::Classic => {
+            let mut agent = AgentLoop::new(
+                loop_config,
+                resolved.provider,
+                tool_registry,
+                skill_runtime,
+                policy,
+                state.agent_state.approval.clone(),
+                state.agent_state.event_bus.clone(),
+                state.agent_state.audit.clone(),
+            );
+
+            let response = agent
+                .run(request.message.trim())
+                .await
+                .map_err(AgentApiError::from_agent_error)?;
+
+            let _ = state
+                .session_store
+                .append(
+                    &session_id,
+                    &mlx_agent_core::session::SessionMessage::user(request.message.clone()),
+                )
+                .await;
+
+            let _ = state
+                .session_store
+                .append(
+                    &session_id,
+                    &mlx_agent_core::session::SessionMessage::assistant(response.content.clone()),
+                )
+                .await;
+
+            response
+        }
+        RuntimeVariant::HermesInspired => {
+            let runtime = AgentRuntime::new(
+                AgentRuntimeConfig {
+                    variant: RuntimeVariant::HermesInspired,
+                    persist_tool_events: request
+                        .persist_tool_events
+                        .unwrap_or(agent_cfg.persist_tool_events),
+                    memory_profile: request
+                        .memory_profile
+                        .clone()
+                        .unwrap_or_else(|| agent_cfg.memory_profile.clone()),
+                    session_search_enabled: request
+                        .session_search_enabled
+                        .unwrap_or(agent_cfg.session_search_enabled),
+                    delegate_depth: request.delegate_depth.unwrap_or(0),
+                    session_context,
+                    session_name: None,
+                    toolset_id: toolset.id.clone(),
+                    memory_snapshot_mode: parse_memory_snapshot_mode(
+                        request
+                            .memory_snapshot_mode
+                            .as_deref()
+                            .or(Some(agent_cfg.memory_snapshot_mode.as_str())),
+                    ),
+                },
+                state.session_store.clone(),
+                state.agent_state.memory.clone(),
+                state.agent_state.event_bus.clone(),
+            );
+
+            runtime
+                .run(
+                    loop_config,
+                    &resolved.provider_name,
+                    resolved.provider,
+                    tool_registry,
+                    skill_runtime,
+                    policy,
+                    state.agent_state.approval.clone(),
+                    state.agent_state.audit.clone(),
+                    request.message.trim(),
+                )
+                .await
+                .map(|result| result.response)
+                .map_err(AgentApiError::from_agent_error)?
+        }
+    };
 
     {
         let mut budget = state.agent_state.budget_tracker.write().await;
@@ -3125,15 +3608,55 @@ async fn execute_agent_request(
     let cfg = super::config::AppConfig::load_settings().apply_env();
     let agent_cfg = cfg.agent.clone();
 
-    let provider = merged_value(request.provider.clone(), &agent_cfg.provider);
-    let model_id = merged_value(request.model_id.clone(), &agent_cfg.model_id);
-    let base_url = merged_value(request.base_url.clone(), &agent_cfg.base_url);
+    if request
+        .provider_profile_id
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .is_some()
+        && resolve_provider_profile(&agent_cfg, &request).is_none()
+    {
+        return Err(AgentApiError::bad_request("provider_profile_id not found"));
+    }
+
+    let provider_profile = resolve_provider_profile(&agent_cfg, &request).cloned();
+    let provider = request
+        .provider
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            provider_profile
+                .as_ref()
+                .map(|profile| profile.provider.clone())
+        })
+        .unwrap_or_else(|| agent_cfg.provider.clone());
+    let model_id = request
+        .model_id
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            provider_profile
+                .as_ref()
+                .map(|profile| profile.model_id.clone())
+        })
+        .unwrap_or_else(|| agent_cfg.model_id.clone());
+    let base_url = request
+        .base_url
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            provider_profile
+                .as_ref()
+                .map(|profile| profile.base_url.clone())
+        })
+        .unwrap_or_else(|| agent_cfg.base_url.clone());
     let api_key = resolve_agent_api_key(request.api_key.clone(), &agent_cfg)?;
     let streaming_enabled = request.streaming.unwrap_or(agent_cfg.streaming);
-    let headers = request
-        .custom_headers
-        .clone()
-        .unwrap_or_else(|| agent_cfg.custom_headers.clone());
+    let headers = request.custom_headers.clone().unwrap_or_else(|| {
+        provider_profile
+            .as_ref()
+            .map(|profile| profile.custom_headers.clone())
+            .unwrap_or_else(|| agent_cfg.custom_headers.clone())
+    });
 
     let workspace = request
         .workspace_root
@@ -3359,7 +3882,7 @@ pub async fn agent_stream(
                         AgentEvent::ToolCallStarted { session_id: event_session_id, tool, .. } if event_session_id == session_id => {
                             Some(AgentStreamFrame::tool("tool_call_started", event_session_id, tool, Some("Executando tool".to_string())))
                         }
-                        AgentEvent::ToolCallCompleted { session_id: event_session_id, tool, result_preview } if event_session_id == session_id => {
+                        AgentEvent::ToolCallCompleted { session_id: event_session_id, tool, result_preview, .. } if event_session_id == session_id => {
                             Some(AgentStreamFrame::tool("tool_call_completed", event_session_id, tool, Some(result_preview)))
                         }
                         AgentEvent::ToolCallDenied { session_id: event_session_id, tool, reason } if event_session_id == session_id => {
@@ -3584,6 +4107,21 @@ pub async fn agent_update_config(
     }
     if merged.tool_policy.profile.trim().is_empty() {
         merged.tool_policy.profile = cfg.agent.tool_policy.profile.clone();
+    }
+    if merged.provider_profiles.is_empty() {
+        merged.provider_profiles = cfg.agent.provider_profiles.clone();
+    }
+    if merged.provider_profile_id.trim().is_empty() {
+        merged.provider_profile_id = cfg.agent.provider_profile_id.clone();
+    }
+    if merged.default_toolset_id.trim().is_empty() {
+        merged.default_toolset_id = cfg.agent.default_toolset_id.clone();
+    }
+    if merged.gateway_mode.trim().is_empty() {
+        merged.gateway_mode = cfg.agent.gateway_mode.clone();
+    }
+    if merged.memory_snapshot_mode.trim().is_empty() {
+        merged.memory_snapshot_mode = cfg.agent.memory_snapshot_mode.clone();
     }
     merged.node_package_manager = normalize_node_manager(
         Some(merged.node_package_manager.as_str()),
@@ -3865,8 +4403,21 @@ pub async fn agent_tools_catalog() -> Result<Json<serde_json::Value>, AgentApiEr
 
     Ok(Json(serde_json::json!({
         "profiles": profiles,
+        "toolsets": mlx_agent_core::toolset_profiles(),
         "entries": mlx_agent_core::tool_catalog(),
     })))
+}
+
+/// GET /agent/toolsets
+pub async fn agent_toolsets() -> Result<Json<Vec<mlx_agent_core::ToolsetProfile>>, AgentApiError> {
+    Ok(Json(mlx_agent_core::toolset_profiles()))
+}
+
+/// GET /agent/provider-profiles
+pub async fn agent_provider_profiles(
+) -> Result<Json<Vec<super::config::AgentProviderProfileConfig>>, AgentApiError> {
+    let cfg = super::config::AppConfig::load_settings().apply_env();
+    Ok(Json(cfg.agent.provider_profiles))
 }
 
 /// GET /agent/tools/effective-policy
@@ -4283,8 +4834,8 @@ pub async fn agent_compat_report(
     let warning_gaps = gaps.iter().filter(|gap| gap.severity == "warning").count();
 
     Ok(Json(AgentCompatReport {
-        mode: "openclaw-compatible".to_string(),
-        target: "OpenClaw parity for local production".to_string(),
+        mode: "hermes-agent".to_string(),
+        target: "Hermes-based local agent".to_string(),
         generated_at: chrono::Utc::now().to_rfc3339(),
         coverage_methodology:
             "Coverage counts implemented compatibility surfaces: registered channels, managed plugins, skill subsystem availability, tool-profile coverage, preserved endpoints, and synthetic small-local context benchmark."
@@ -4477,11 +5028,8 @@ pub async fn agent_create_session(
     let meta = sessions
         .into_iter()
         .find(|s| s.id == session_id)
-        .unwrap_or_else(|| mlx_agent_core::session::SessionMeta {
-            id: session_id,
-            name: "Nova conversa".to_string(),
-            updated_at: chrono::Utc::now(),
-            message_count: 0,
+        .unwrap_or_else(|| {
+            mlx_agent_core::session::SessionMeta::basic(session_id, "Nova conversa".to_string())
         });
 
     Ok(Json(meta))
@@ -4882,6 +5430,102 @@ mod tests {
 
         assert!(!exec.allowed);
         assert_eq!(exec.final_rule, "session:session-a:deny:exec");
+    }
+
+    #[test]
+    fn resolve_provider_profile_prefers_request_then_config_default() {
+        let mut cfg = crate::config::AgentUiConfig::default();
+        cfg.provider_profiles
+            .push(crate::config::AgentProviderProfileConfig {
+                id: "mlx-local".to_string(),
+                description: "Apple Silicon MLX".to_string(),
+                provider: "mlx".to_string(),
+                model_id: "mlx-community/Qwen3-4B-4bit".to_string(),
+                base_url: String::new(),
+                api_key_ref: None,
+                custom_headers: BTreeMap::new(),
+                runtime_variant: "hermes_inspired".to_string(),
+            });
+        cfg.provider_profile_id = "ollama-local".to_string();
+
+        let default_request = AgentRunRequest {
+            session_id: None,
+            message: "hello".to_string(),
+            provider: None,
+            model_id: None,
+            api_key: None,
+            base_url: None,
+            custom_headers: None,
+            streaming: None,
+            fallback_enabled: None,
+            fallback_provider: None,
+            fallback_model_id: None,
+            execution_mode: None,
+            approval_mode: None,
+            system_prompt: None,
+            max_iterations: None,
+            max_prompt_tokens: None,
+            max_history_messages: None,
+            max_tools_in_prompt: None,
+            temperature: None,
+            aggressive_tool_filtering: None,
+            enable_tool_call_fallback: None,
+            runtime_variant: None,
+            persist_tool_events: None,
+            session_search_enabled: None,
+            memory_profile: None,
+            memory_snapshot_mode: None,
+            session_context: None,
+            gateway_context: None,
+            delegate_depth: None,
+            enabled_skills: None,
+            enabled_tools: None,
+            toolset_id: None,
+            provider_profile_id: None,
+            workspace_root: None,
+        };
+        let default_profile = resolve_provider_profile(&cfg, &default_request).unwrap();
+        assert_eq!(default_profile.id, "ollama-local");
+
+        let explicit_request = AgentRunRequest {
+            session_id: None,
+            message: "hello".to_string(),
+            provider: None,
+            model_id: None,
+            api_key: None,
+            base_url: None,
+            custom_headers: None,
+            streaming: None,
+            fallback_enabled: None,
+            fallback_provider: None,
+            fallback_model_id: None,
+            execution_mode: None,
+            approval_mode: None,
+            system_prompt: None,
+            max_iterations: None,
+            max_prompt_tokens: None,
+            max_history_messages: None,
+            max_tools_in_prompt: None,
+            temperature: None,
+            aggressive_tool_filtering: None,
+            enable_tool_call_fallback: None,
+            runtime_variant: None,
+            persist_tool_events: None,
+            session_search_enabled: None,
+            memory_profile: None,
+            memory_snapshot_mode: None,
+            session_context: None,
+            gateway_context: None,
+            delegate_depth: None,
+            enabled_skills: None,
+            enabled_tools: None,
+            toolset_id: None,
+            provider_profile_id: Some("mlx-local".to_string()),
+            workspace_root: None,
+        };
+        let explicit_profile = resolve_provider_profile(&cfg, &explicit_request).unwrap();
+        assert_eq!(explicit_profile.id, "mlx-local");
+        assert_eq!(explicit_profile.provider, "mlx");
     }
 
     #[test]

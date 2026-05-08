@@ -67,7 +67,7 @@ impl SkillLoader {
 
     /// Create a loader from a workspace root.
     ///
-    /// Supports the legacy `skills/` layout plus Claude/OpenClaw/Codex-style
+    /// Supports the legacy `skills/` layout plus Claude/Hermes/Codex-style
     /// project-local roots.
     pub fn from_workspace(workspace_root: &Path, limits: SkillLimits) -> Self {
         Self::with_dirs(workspace_skill_dirs(workspace_root), limits)
@@ -120,31 +120,11 @@ impl SkillLoader {
         let mut seen_names = HashSet::new();
 
         for skills_dir in existing_dirs {
-            let mut entries = tokio::fs::read_dir(&skills_dir)
+            let skill_files = collect_skill_files(&skills_dir)
                 .await
                 .map_err(ResolverError::Io)?;
 
-            while let Some(entry) = entries.next_entry().await.map_err(ResolverError::Io)? {
-                let path = entry.path();
-
-                // Each skill is a directory containing SKILL.md.
-                let skill_file = if path.is_dir() {
-                    path.join("SKILL.md")
-                } else if path.is_file()
-                    && path
-                        .file_name()
-                        .is_some_and(|f| f.eq_ignore_ascii_case("SKILL.md"))
-                {
-                    // Also accept SKILL.md directly in the root (flat layout).
-                    path.clone()
-                } else {
-                    continue;
-                };
-
-                if !skill_file.exists() {
-                    continue;
-                }
-
+            for skill_file in skill_files {
                 match self.load_single(&skill_file).await {
                     Ok(pkg) => {
                         let normalized_name = pkg.name.to_ascii_lowercase();
@@ -215,6 +195,15 @@ impl SkillLoader {
             SkillSource::Workspace,
             TrustLevel::Local,
         );
+        if package.import_source.is_none()
+            && matches!(package.format, crate::types::SkillFormat::HermesCompatible)
+        {
+            package.import_source = Some("hermes_compatible".to_string());
+            package.compatibility_notes.push(
+                "Imported via Hermes-compatible metadata; review tools/capabilities before enabling."
+                    .to_string(),
+            );
+        }
         package.sha256 = Some(sha256_hex(content.as_bytes()));
         Ok(package)
     }
@@ -276,11 +265,41 @@ impl SkillLoader {
     }
 }
 
+async fn collect_skill_files(root: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let mut out = Vec::new();
+    let mut pending = vec![root.to_path_buf()];
+
+    while let Some(dir) = pending.pop() {
+        let mut entries = match tokio::fs::read_dir(&dir).await {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+
+        while let Some(entry) = entries.next_entry().await? {
+            let path = entry.path();
+            if path.is_dir() {
+                pending.push(path);
+                continue;
+            }
+            if path
+                .file_name()
+                .is_some_and(|file| file.eq_ignore_ascii_case("SKILL.md"))
+            {
+                out.push(path);
+            }
+        }
+    }
+
+    out.sort();
+    Ok(out)
+}
+
 fn workspace_skill_dirs(workspace_root: &Path) -> Vec<PathBuf> {
     vec![
         workspace_root.join("skills"),
         workspace_root.join(".claude").join("skills"),
-        workspace_root.join(".openclaw").join("skills"),
+        workspace_root.join(".hermes").join("skills"),
         workspace_root.join(".codex").join("skills"),
     ]
 }
@@ -449,9 +468,9 @@ description: Understand the repository quickly.
     }
 
     #[tokio::test]
-    async fn load_all_from_openclaw_compat_directory() {
-        let tmp = std::env::temp_dir().join("skill_loader_openclaw_test");
-        let skills = tmp.join(".openclaw").join("skills");
+    async fn load_all_from_hermes_compat_directory() {
+        let tmp = std::env::temp_dir().join("skill_loader_hermes_test");
+        let skills = tmp.join(".hermes").join("skills");
         let _ = fs::remove_dir_all(&tmp);
         fs::create_dir_all(&skills).unwrap();
 
@@ -460,7 +479,7 @@ description: Understand the repository quickly.
             "runtime-ops",
             r#"---
 name: runtime-ops
-description: Manage OpenClaw runtime tasks.
+description: Manage Hermes runtime tasks.
 ---
 
 # Runtime Ops
@@ -548,12 +567,12 @@ description: Claude layout.
         let tmp = std::env::temp_dir().join("skill_loader_all_roots_test");
         let legacy = tmp.join("skills");
         let claude = tmp.join(".claude").join("skills");
-        let openclaw = tmp.join(".openclaw").join("skills");
+        let hermes = tmp.join(".hermes").join("skills");
         let codex = tmp.join(".codex").join("skills");
         let _ = fs::remove_dir_all(&tmp);
         fs::create_dir_all(&legacy).unwrap();
         fs::create_dir_all(&claude).unwrap();
-        fs::create_dir_all(&openclaw).unwrap();
+        fs::create_dir_all(&hermes).unwrap();
         fs::create_dir_all(&codex).unwrap();
 
         create_test_skill(
@@ -575,11 +594,11 @@ description: Claude layout.
 "#,
         );
         create_test_skill(
-            &openclaw,
-            "openclaw-skill",
+            &hermes,
+            "hermes-skill",
             r#"---
-name: openclaw-skill
-description: OpenClaw layout.
+name: hermes-skill
+description: Hermes layout.
 ---
 "#,
         );
@@ -602,7 +621,7 @@ description: Codex layout.
         assert_eq!(loaded.len(), 4);
         assert!(names.contains(&"legacy-skill"));
         assert!(names.contains(&"claude-skill"));
-        assert!(names.contains(&"openclaw-skill"));
+        assert!(names.contains(&"hermes-skill"));
         assert!(names.contains(&"codex-skill"));
 
         fs::remove_dir_all(&tmp).unwrap();
@@ -707,7 +726,7 @@ compat
             r#"---
 name: obsidian
 description: Obsidian integration.
-metadata: {"openclaw":{"requires":{"bins":["obsidian"]}}}
+metadata: {"hermes":{"requires":{"bins":["obsidian"]}}}
 ---
 "#,
         );
@@ -717,7 +736,7 @@ metadata: {"openclaw":{"requires":{"bins":["obsidian"]}}}
             r#"---
 name: wacli
 description: WhatsApp CLI integration.
-metadata: {"openclaw":{"requires":{"bins":["wa-cli"]}}}
+metadata: {"hermes":{"requires":{"bins":["wa-cli"]}}}
 ---
 "#,
         );
@@ -727,7 +746,7 @@ metadata: {"openclaw":{"requires":{"bins":["wa-cli"]}}}
             r#"---
 name: gog
 description: GOG downloads.
-metadata: {"openclaw":{"requires":{"anyBins":["gogdl","lgogdownloader"]}}}
+metadata: {"hermes":{"requires":{"anyBins":["gogdl","lgogdownloader"]}}}
 ---
 "#,
         );
@@ -738,7 +757,7 @@ metadata: {"openclaw":{"requires":{"anyBins":["gogdl","lgogdownloader"]}}}
 name: github
 description: GitHub operations.
 metadata:
-  openclaw:
+  hermes:
     primaryEnv: GITHUB_TOKEN
     requires:
       bins: ["gh"]
@@ -752,7 +771,7 @@ metadata:
             r#"---
 name: weather
 description: Weather lookup.
-metadata: {"openclaw":{"requires":{"bins":["curl"]}}}
+metadata: {"hermes":{"requires":{"bins":["curl"]}}}
 ---
 "#,
         );
@@ -763,7 +782,7 @@ metadata: {"openclaw":{"requires":{"bins":["curl"]}}}
 name: summarize
 description: Summaries.
 metadata:
-  openclaw:
+  hermes:
     requires:
       config: ["provider"]
 ---
@@ -842,9 +861,20 @@ metadata:
                 file_path: PathBuf::from(format!("skills/skill-{i}/SKILL.md")),
                 base_dir: PathBuf::from(format!("skills/skill-{i}")),
                 body: format!("Body {i}"),
+                format: crate::types::SkillFormat::Native,
+                manifest_version: "1".to_string(),
+                references: Vec::new(),
+                scripts: Vec::new(),
+                templates: Vec::new(),
+                assets: Vec::new(),
+                routines: Vec::new(),
+                workflow_bindings: Vec::new(),
                 requires: Default::default(),
                 capabilities: Default::default(),
+                policy: Default::default(),
                 install: Vec::new(),
+                import_source: None,
+                compatibility_notes: Vec::new(),
                 sha256: None,
                 trust_level: TrustLevel::Local,
             })
@@ -878,9 +908,20 @@ metadata:
                 file_path: PathBuf::from(format!("skills/skill-{i}/SKILL.md")),
                 base_dir: PathBuf::from(format!("skills/skill-{i}")),
                 body: String::new(),
+                format: crate::types::SkillFormat::Native,
+                manifest_version: "1".to_string(),
+                references: Vec::new(),
+                scripts: Vec::new(),
+                templates: Vec::new(),
+                assets: Vec::new(),
+                routines: Vec::new(),
+                workflow_bindings: Vec::new(),
                 requires: Default::default(),
                 capabilities: Default::default(),
+                policy: Default::default(),
                 install: Vec::new(),
+                import_source: None,
+                compatibility_notes: Vec::new(),
                 sha256: None,
                 trust_level: TrustLevel::Local,
             })
@@ -911,9 +952,20 @@ metadata:
             file_path: PathBuf::from(format!("skills/{name}/SKILL.md")),
             base_dir: PathBuf::from(format!("skills/{name}")),
             body: String::new(),
+            format: crate::types::SkillFormat::Native,
+            manifest_version: "1".to_string(),
+            references: Vec::new(),
+            scripts: Vec::new(),
+            templates: Vec::new(),
+            assets: Vec::new(),
+            routines: Vec::new(),
+            workflow_bindings: Vec::new(),
             requires: Default::default(),
             capabilities: Default::default(),
+            policy: Default::default(),
             install: Vec::new(),
+            import_source: None,
+            compatibility_notes: Vec::new(),
             sha256: None,
             trust_level: TrustLevel::Local,
         };
@@ -930,4 +982,59 @@ metadata:
         assert!(prompt.text.contains("always-1"));
         assert!(prompt.truncated); // 2nd regular was truncated.
     }
+
+    #[tokio::test]
+    async fn hermes_compatible_skill_sets_import_metadata_and_indexes_support_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("skills");
+        let skill_dir = root.join("planner");
+        std::fs::create_dir_all(skill_dir.join("references/deep")).unwrap();
+        std::fs::create_dir_all(skill_dir.join("scripts")).unwrap();
+        std::fs::create_dir_all(skill_dir.join("templates")).unwrap();
+        std::fs::create_dir_all(skill_dir.join("assets")).unwrap();
+        std::fs::create_dir_all(skill_dir.join("routines")).unwrap();
+        std::fs::create_dir_all(skill_dir.join("workflows")).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            r#"---
+name: planner
+description: Hermes-style planner
+metadata:
+  hermes:
+    import_source: hermes://skills/planner
+    compatibility_notes:
+      - Requires review before enabling exec
+---
+
+# Planner
+"#,
+        )
+        .unwrap();
+        std::fs::write(skill_dir.join("references/deep/readme.md"), "ref").unwrap();
+        std::fs::write(skill_dir.join("scripts/run.sh"), "echo hi").unwrap();
+        std::fs::write(skill_dir.join("templates/prompt.md"), "template").unwrap();
+        std::fs::write(skill_dir.join("assets/icon.txt"), "asset").unwrap();
+        std::fs::write(skill_dir.join("routines/plan.json"), "{}").unwrap();
+        std::fs::write(skill_dir.join("workflows/build.yaml"), "name: build").unwrap();
+
+        let loader = SkillLoader::new(root, SkillLimits::default());
+        let skills = loader.load_all().await.unwrap();
+        let skill = skills.iter().find(|skill| skill.name == "planner").unwrap();
+        assert_eq!(
+            skill.import_source.as_deref(),
+            Some("hermes://skills/planner")
+        );
+        assert!(skill
+            .compatibility_notes
+            .iter()
+            .any(|note| note.contains("review")));
+        assert!(!skill.references.is_empty());
+        assert!(!skill.scripts.is_empty());
+        assert!(!skill.templates.is_empty());
+        assert!(!skill.assets.is_empty());
+        assert_eq!(skill.routines.len(), 1);
+        assert_eq!(skill.workflow_bindings.len(), 1);
+    }
 }
+
+

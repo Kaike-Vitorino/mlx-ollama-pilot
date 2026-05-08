@@ -170,6 +170,44 @@ pub enum InstallKind {
 
 // ── Skill package ──────────────────────────────────────────────────
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SkillFormat {
+    #[default]
+    Native,
+    Claude,
+    Codex,
+    HermesCompatible,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SkillPolicy {
+    #[serde(default)]
+    pub enabled_by_default: bool,
+    #[serde(default)]
+    pub tags: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SkillRoutine {
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub entrypoint: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct WorkflowBinding {
+    pub id: String,
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub target: String,
+}
+
 /// A fully parsed skill package.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SkillPackage {
@@ -190,11 +228,33 @@ pub struct SkillPackage {
     pub base_dir: PathBuf,
     pub body: String,
     #[serde(default)]
+    pub format: SkillFormat,
+    #[serde(default = "default_manifest_version")]
+    pub manifest_version: String,
+    #[serde(default)]
+    pub references: Vec<PathBuf>,
+    #[serde(default)]
+    pub scripts: Vec<PathBuf>,
+    #[serde(default)]
+    pub templates: Vec<PathBuf>,
+    #[serde(default)]
+    pub assets: Vec<PathBuf>,
+    #[serde(default)]
+    pub routines: Vec<SkillRoutine>,
+    #[serde(default)]
+    pub workflow_bindings: Vec<WorkflowBinding>,
+    #[serde(default)]
     pub requires: SkillRequirements,
     #[serde(default)]
     pub capabilities: SkillCapabilities,
     #[serde(default)]
+    pub policy: SkillPolicy,
+    #[serde(default)]
     pub install: Vec<InstallSpec>,
+    #[serde(default)]
+    pub import_source: Option<String>,
+    #[serde(default)]
+    pub compatibility_notes: Vec<String>,
     #[serde(default)]
     pub sha256: Option<String>,
     #[serde(default)]
@@ -219,6 +279,10 @@ pub enum TrustLevel {
     Local,
     #[default]
     Unknown,
+}
+
+fn default_manifest_version() -> String {
+    "1".to_string()
 }
 
 /// Ambient data used to evaluate skill requirements without mutating process state.

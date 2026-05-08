@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use mlx_ollama_core::{
     ChatMessage, ChatRequest, ChatResponse, ChatToolsRequest, GenerationOptions, MessageRole,
-    ModelDescriptor, ModelProvider, ProviderError, TokenUsage,
+    ModelDescriptor, ModelProvider, ProviderError, RuntimeProviderConfig, TokenUsage,
 };
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
@@ -62,7 +62,18 @@ impl OllamaProvider {
     }
 
     fn endpoint(&self, path: &str) -> Result<String, ProviderError> {
-        let base = self.cfg.base_url.trim();
+        self.endpoint_with_runtime(path, None)
+    }
+
+    fn endpoint_with_runtime(
+        &self,
+        path: &str,
+        runtime: Option<&RuntimeProviderConfig>,
+    ) -> Result<String, ProviderError> {
+        let base = runtime
+            .and_then(|cfg| cfg.base_url.as_deref())
+            .unwrap_or(self.cfg.base_url.as_str())
+            .trim();
         if base.is_empty() {
             return Err(ProviderError::InvalidRequest {
                 details: "APP_OLLAMA_BASE_URL nao pode ser vazio".to_string(),
@@ -134,8 +145,35 @@ impl OllamaProvider {
         self.wait_until_ready().await
     }
 
-    async fn ping_server_with_timeout(&self, timeout: Duration) -> bool {
-        let endpoint = match self.endpoint("/api/version") {
+    async fn ensure_ready_with_runtime(
+        &self,
+        runtime: Option<&RuntimeProviderConfig>,
+    ) -> Result<(), ProviderError> {
+        if runtime
+            .and_then(|cfg| cfg.base_url.as_deref())
+            .filter(|value| !value.trim().is_empty())
+            .is_some()
+        {
+            if self
+                .ping_server_with_timeout(Duration::from_secs(2), runtime)
+                .await
+            {
+                return Ok(());
+            }
+            return Err(ProviderError::Unavailable {
+                details: "runtime Ollama base_url did not respond".to_string(),
+            });
+        }
+
+        self.ensure_ready().await
+    }
+
+    async fn ping_server_with_timeout(
+        &self,
+        timeout: Duration,
+        runtime: Option<&RuntimeProviderConfig>,
+    ) -> bool {
+        let endpoint = match self.endpoint_with_runtime("/api/version", runtime) {
             Ok(value) => value,
             Err(_) => return false,
         };
@@ -154,7 +192,29 @@ impl OllamaProvider {
     }
 
     async fn ping_server(&self) -> bool {
-        self.ping_server_with_timeout(Duration::from_secs(2)).await
+        self.ping_server_with_timeout(Duration::from_secs(2), None)
+            .await
+    }
+
+    fn apply_runtime_headers(
+        &self,
+        builder: reqwest::RequestBuilder,
+        runtime: Option<&RuntimeProviderConfig>,
+    ) -> reqwest::RequestBuilder {
+        let mut out = builder;
+        if let Some(runtime) = runtime {
+            for (key, value) in &runtime.headers {
+                out = out.header(key, value);
+            }
+            if let Some(api_key) = runtime
+                .api_key
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+            {
+                out = out.bearer_auth(api_key);
+            }
+        }
+        out
     }
 
     async fn wait_until_ready(&self) -> Result<(), ProviderError> {
@@ -410,17 +470,23 @@ impl ModelProvider for OllamaProvider {
     }
 
     async fn list_models(&self) -> Result<Vec<ModelDescriptor>, ProviderError> {
+        self.list_models_with_runtime(None).await
+    }
+
+    async fn list_models_with_runtime(
+        &self,
+        runtime: Option<RuntimeProviderConfig>,
+    ) -> Result<Vec<ModelDescriptor>, ProviderError> {
         if !self
-            .ping_server_with_timeout(Duration::from_millis(400))
+            .ping_server_with_timeout(Duration::from_millis(400), runtime.as_ref())
             .await
         {
             return Ok(Vec::new());
         }
 
-        let endpoint = self.endpoint("/api/tags")?;
+        let endpoint = self.endpoint_with_runtime("/api/tags", runtime.as_ref())?;
         let response = self
-            .client
-            .get(&endpoint)
+            .apply_runtime_headers(self.client.get(&endpoint), runtime.as_ref())
             .send()
             .await
             .map_err(Self::map_network_error)?;
@@ -475,8 +541,29 @@ impl ModelProvider for OllamaProvider {
     }
 
     async fn chat(&self, request: ChatRequest) -> Result<ChatResponse, ProviderError> {
-        self.do_chat(&request.model_id, &request.messages, &request.options, None)
-            .await
+        self.do_chat(
+            &request.model_id,
+            &request.messages,
+            &request.options,
+            None,
+            None,
+        )
+        .await
+    }
+
+    async fn chat_with_runtime(
+        &self,
+        request: ChatRequest,
+        runtime: Option<RuntimeProviderConfig>,
+    ) -> Result<ChatResponse, ProviderError> {
+        self.do_chat(
+            &request.model_id,
+            &request.messages,
+            &request.options,
+            None,
+            runtime.as_ref(),
+        )
+        .await
     }
 
     async fn chat_with_tools(
@@ -488,6 +575,22 @@ impl ModelProvider for OllamaProvider {
             &request.messages,
             &request.options,
             Some(request.tools),
+            None,
+        )
+        .await
+    }
+
+    async fn chat_with_tools_with_runtime(
+        &self,
+        request: ChatToolsRequest,
+        runtime: Option<RuntimeProviderConfig>,
+    ) -> Result<ChatResponse, ProviderError> {
+        self.do_chat(
+            &request.model_id,
+            &request.messages,
+            &request.options,
+            Some(request.tools),
+            runtime.as_ref(),
         )
         .await
     }
@@ -520,6 +623,7 @@ impl OllamaProvider {
         messages: &[ChatMessage],
         options: &GenerationOptions,
         tools: Option<Vec<mlx_ollama_core::FunctionDef>>,
+        runtime: Option<&RuntimeProviderConfig>,
     ) -> Result<ChatResponse, ProviderError> {
         if messages.is_empty() {
             return Err(ProviderError::InvalidRequest {
@@ -528,14 +632,13 @@ impl OllamaProvider {
         }
 
         let body = self.build_chat_request(model_id, messages, options, tools)?;
-        self.ensure_ready().await?;
+        self.ensure_ready_with_runtime(runtime).await?;
 
-        let endpoint = self.endpoint("/api/chat")?;
+        let endpoint = self.endpoint_with_runtime("/api/chat", runtime)?;
         let started = Instant::now();
 
         let response = self
-            .client
-            .post(&endpoint)
+            .apply_runtime_headers(self.client.post(&endpoint), runtime)
             .json(&body)
             .send()
             .await
@@ -798,5 +901,19 @@ mod tests {
                 .unwrap(),
             "San Francisco"
         );
+    }
+
+    #[test]
+    fn runtime_endpoint_override_uses_runtime_base_url() {
+        let provider = OllamaProvider::new(OllamaProviderConfig::default());
+        let runtime = RuntimeProviderConfig {
+            base_url: Some("http://127.0.0.1:22445".to_string()),
+            api_key: None,
+            headers: Default::default(),
+        };
+        let endpoint = provider
+            .endpoint_with_runtime("/api/chat", Some(&runtime))
+            .unwrap();
+        assert_eq!(endpoint, "http://127.0.0.1:22445/api/chat");
     }
 }

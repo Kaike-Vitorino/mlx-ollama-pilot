@@ -133,6 +133,40 @@ impl Default for AgentSkillOverride {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentProviderProfileConfig {
+    pub id: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default = "default_agent_provider")]
+    pub provider: String,
+    #[serde(default = "default_agent_model")]
+    pub model_id: String,
+    #[serde(default)]
+    pub base_url: String,
+    #[serde(default)]
+    pub api_key_ref: Option<String>,
+    #[serde(default)]
+    pub custom_headers: BTreeMap<String, String>,
+    #[serde(default = "default_agent_runtime_variant")]
+    pub runtime_variant: String,
+}
+
+impl Default for AgentProviderProfileConfig {
+    fn default() -> Self {
+        Self {
+            id: "ollama-local".to_string(),
+            description: "Default local Ollama profile".to_string(),
+            provider: "ollama".to_string(),
+            model_id: default_agent_model(),
+            base_url: "http://127.0.0.1:11434".to_string(),
+            api_key_ref: None,
+            custom_headers: BTreeMap::new(),
+            runtime_variant: default_agent_runtime_variant(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentUiConfig {
     #[serde(default = "default_agent_provider")]
     pub provider: String,
@@ -170,6 +204,16 @@ pub struct AgentUiConfig {
     pub aggressive_tool_filtering: bool,
     #[serde(default = "default_true")]
     pub enable_tool_call_fallback: bool,
+    #[serde(default = "default_agent_runtime_variant")]
+    pub runtime_variant: String,
+    #[serde(default)]
+    pub persist_tool_events: bool,
+    #[serde(default = "default_memory_profile")]
+    pub memory_profile: String,
+    #[serde(default)]
+    pub session_search_enabled: bool,
+    #[serde(default = "default_agent_memory_snapshot_mode")]
+    pub memory_snapshot_mode: String,
     #[serde(default)]
     pub enabled_skills: Vec<String>,
     #[serde(default = "default_agent_node_manager")]
@@ -178,6 +222,14 @@ pub struct AgentUiConfig {
     pub skill_overrides: BTreeMap<String, AgentSkillOverride>,
     #[serde(default)]
     pub enabled_tools: Vec<String>,
+    #[serde(default = "default_toolset_id")]
+    pub default_toolset_id: String,
+    #[serde(default)]
+    pub provider_profile_id: String,
+    #[serde(default = "default_gateway_mode")]
+    pub gateway_mode: String,
+    #[serde(default)]
+    pub provider_profiles: Vec<AgentProviderProfileConfig>,
     #[serde(default)]
     pub tool_policy: AgentToolPolicyConfig,
     #[serde(default)]
@@ -196,13 +248,17 @@ impl Default for AgentUiConfig {
             "glob".to_string(),
             "grep".to_string(),
             "exec".to_string(),
+            "toolsets_list".to_string(),
             "sessions_list".to_string(),
             "sessions_history".to_string(),
             "sessions_spawn".to_string(),
             "sessions_send".to_string(),
             "sessions_status".to_string(),
+            "session_search".to_string(),
             "memory_search".to_string(),
             "memory_get".to_string(),
+            "memory_write".to_string(),
+            "delegate_session".to_string(),
             "checkpoints_list".to_string(),
             "checkpoint_restore".to_string(),
         ];
@@ -234,10 +290,19 @@ impl Default for AgentUiConfig {
             temperature: Some(0.1),
             aggressive_tool_filtering: true,
             enable_tool_call_fallback: true,
+            runtime_variant: default_agent_runtime_variant(),
+            persist_tool_events: false,
+            memory_profile: default_memory_profile(),
+            session_search_enabled: true,
+            memory_snapshot_mode: default_agent_memory_snapshot_mode(),
             enabled_skills: Vec::new(),
             node_package_manager: default_agent_node_manager(),
             skill_overrides: BTreeMap::new(),
             enabled_tools: default_tools,
+            default_toolset_id: default_toolset_id(),
+            provider_profile_id: "ollama-local".to_string(),
+            gateway_mode: default_gateway_mode(),
+            provider_profiles: vec![AgentProviderProfileConfig::default()],
             tool_policy,
             workspace_root: None,
             security: AgentSecurityConfig::default(),
@@ -474,17 +539,6 @@ pub struct AppConfig {
     pub brave_api_key: Option<String>,
     pub catalog_search_limit: usize,
     pub catalog_download_timeout: Duration,
-    pub openclaw_node_command: String,
-    pub openclaw_cli_path: PathBuf,
-    pub openclaw_state_dir: PathBuf,
-    pub openclaw_gateway_token: String,
-    pub openclaw_session_key: String,
-    pub openclaw_timeout: Duration,
-    pub openclaw_gateway_log: PathBuf,
-    pub openclaw_error_log: PathBuf,
-    pub openclaw_sync_log: PathBuf,
-    pub nanobot_cli_path: PathBuf,
-    pub active_agent_framework: String,
     #[serde(default)]
     pub agent: AgentUiConfig,
     #[serde(default)]
@@ -494,10 +548,6 @@ pub struct AppConfig {
 impl Default for AppConfig {
     fn default() -> Self {
         let models_dir = default_models_dir();
-        let app_data_dir = default_app_data_dir();
-        let openclaw_state_dir = default_openclaw_state_dir();
-        let openclaw_logs_dir = openclaw_state_dir.join("logs");
-
         Self {
             schema_version: default_app_config_schema_version(),
             bind_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 11435),
@@ -533,17 +583,6 @@ impl Default for AppConfig {
             brave_api_key: None,
             catalog_search_limit: 18,
             catalog_download_timeout: Duration::from_secs(21600),
-            openclaw_node_command: "node".to_string(),
-            openclaw_cli_path: app_data_dir.join("openclaw").join("openclaw.mjs"),
-            openclaw_state_dir: openclaw_state_dir.clone(),
-            openclaw_gateway_token: "openclaw-local-token".to_string(),
-            openclaw_session_key: "agent:main:main".to_string(),
-            openclaw_timeout: Duration::from_secs(120),
-            openclaw_gateway_log: openclaw_logs_dir.join("gateway.log"),
-            openclaw_error_log: openclaw_logs_dir.join("gateway.err.log"),
-            openclaw_sync_log: app_data_dir.join("logs").join("openclaw-mlx-sync.log"),
-            nanobot_cli_path: app_data_dir.join("nanobot"),
-            active_agent_framework: "openclaw".to_string(),
             agent: AgentUiConfig::default(),
             compatibility: CompatibilityConfig::default(),
         }
@@ -829,82 +868,6 @@ impl AppConfig {
             }
         }
 
-        if let Ok(value) = env::var("APP_OPENCLAW_NODE_COMMAND") {
-            let trimmed = value.trim();
-            if !trimmed.is_empty() {
-                self.openclaw_node_command = trimmed.to_string();
-            }
-        }
-
-        if let Ok(value) = env::var("APP_OPENCLAW_CLI_PATH") {
-            let trimmed = value.trim();
-            if !trimmed.is_empty() {
-                self.openclaw_cli_path = PathBuf::from(trimmed);
-            }
-        }
-
-        if let Ok(value) = env::var("APP_OPENCLAW_STATE_DIR") {
-            let trimmed = value.trim();
-            if !trimmed.is_empty() {
-                self.openclaw_state_dir = PathBuf::from(trimmed);
-            }
-        }
-
-        if let Ok(value) = env::var("APP_OPENCLAW_GATEWAY_TOKEN") {
-            let trimmed = value.trim();
-            if !trimmed.is_empty() {
-                self.openclaw_gateway_token = trimmed.to_string();
-            }
-        }
-
-        if let Ok(value) = env::var("APP_OPENCLAW_SESSION_KEY") {
-            let trimmed = value.trim();
-            if !trimmed.is_empty() {
-                self.openclaw_session_key = trimmed.to_string();
-            }
-        }
-
-        if let Ok(value) = env::var("APP_OPENCLAW_TIMEOUT_SECS") {
-            if let Ok(seconds) = value.parse::<u64>() {
-                self.openclaw_timeout = Duration::from_secs(seconds.max(5));
-            }
-        }
-
-        if let Ok(value) = env::var("APP_OPENCLAW_GATEWAY_LOG") {
-            let trimmed = value.trim();
-            if !trimmed.is_empty() {
-                self.openclaw_gateway_log = PathBuf::from(trimmed);
-            }
-        }
-
-        if let Ok(value) = env::var("APP_OPENCLAW_ERROR_LOG") {
-            let trimmed = value.trim();
-            if !trimmed.is_empty() {
-                self.openclaw_error_log = PathBuf::from(trimmed);
-            }
-        }
-
-        if let Ok(value) = env::var("APP_OPENCLAW_SYNC_LOG") {
-            let trimmed = value.trim();
-            if !trimmed.is_empty() {
-                self.openclaw_sync_log = PathBuf::from(trimmed);
-            }
-        }
-
-        if let Ok(value) = env::var("APP_NANOBOT_CLI_PATH") {
-            let trimmed = value.trim();
-            if !trimmed.is_empty() {
-                self.nanobot_cli_path = PathBuf::from(trimmed);
-            }
-        }
-
-        if let Ok(value) = env::var("APP_ACTIVE_AGENT_FRAMEWORK") {
-            let normalized = value.trim().to_ascii_lowercase();
-            if matches!(normalized.as_str(), "openclaw" | "nanobot") {
-                self.active_agent_framework = normalized;
-            }
-        }
-
         if let Ok(value) = env::var("APP_AGENT_PROVIDER") {
             let trimmed = value.trim();
             if !trimmed.is_empty() {
@@ -1109,7 +1072,6 @@ fn normalize_loaded_config(cfg: &mut AppConfig) {
     upgrade_legacy_agent_model_default(&mut cfg.agent);
     normalize_mlx_airllm_python_command(cfg);
     normalize_mlx_command(cfg);
-    repair_openclaw_paths(cfg);
 }
 
 fn seed_agent_tool_defaults(agent: &mut AgentUiConfig) {
@@ -1136,6 +1098,24 @@ fn seed_agent_tool_defaults(agent: &mut AgentUiConfig) {
         {
             default_override.allow.push(tool_name.to_string());
         }
+    }
+
+    if agent.default_toolset_id.trim().is_empty() {
+        agent.default_toolset_id = default_toolset_id();
+    }
+    if agent.gateway_mode.trim().is_empty() {
+        agent.gateway_mode = default_gateway_mode();
+    }
+    if agent.memory_snapshot_mode.trim().is_empty() {
+        agent.memory_snapshot_mode = default_agent_memory_snapshot_mode();
+    }
+    if agent.provider_profiles.is_empty() {
+        agent
+            .provider_profiles
+            .push(AgentProviderProfileConfig::default());
+    }
+    if agent.provider_profile_id.trim().is_empty() {
+        agent.provider_profile_id = "ollama-local".to_string();
     }
 }
 
@@ -1164,133 +1144,6 @@ fn upgrade_legacy_agent_model_default(agent: &mut AgentUiConfig) {
     if normalized == "qwen2.5:7b" {
         agent.model_id = default_agent_model();
     }
-}
-
-fn repair_openclaw_paths(cfg: &mut AppConfig) {
-    let resolved_cli_path = resolve_openclaw_cli_path(&cfg.openclaw_cli_path);
-    let repaired_cli = !cfg.openclaw_cli_path.exists() && resolved_cli_path.exists();
-    if repaired_cli {
-        cfg.openclaw_cli_path = resolved_cli_path.clone();
-    }
-
-    let resolved_state_dir =
-        resolve_openclaw_state_dir(&cfg.openclaw_state_dir, &resolved_cli_path);
-    let repaired_state_dir =
-        !cfg.openclaw_state_dir.exists() && resolved_state_dir != cfg.openclaw_state_dir;
-    if repaired_state_dir {
-        cfg.openclaw_state_dir = resolved_state_dir;
-    }
-
-    if let Some(openclaw_root) = cfg
-        .openclaw_state_dir
-        .parent()
-        .and_then(|value| value.parent())
-    {
-        let sibling_cli = openclaw_root.join("openclaw.mjs");
-        if sibling_cli.exists() {
-            cfg.openclaw_cli_path = sibling_cli;
-        }
-    }
-
-    if repaired_cli || repaired_state_dir {
-        let logs_dir = cfg.openclaw_state_dir.join("logs");
-        cfg.openclaw_gateway_log = logs_dir.join("gateway.log");
-        cfg.openclaw_error_log = logs_dir.join("gateway.err.log");
-        cfg.openclaw_sync_log = default_app_data_dir()
-            .join("logs")
-            .join("openclaw-mlx-sync.log");
-    }
-}
-
-fn resolve_openclaw_cli_path(current: &PathBuf) -> PathBuf {
-    if current.exists()
-        && current
-            .parent()
-            .map(|root| root.join("deploy").join("data").exists())
-            .unwrap_or(false)
-    {
-        return current.clone();
-    }
-
-    let mut candidates = Vec::new();
-
-    if let Some(parent) = current.parent() {
-        candidates.push(parent.join("openclaw.mjs"));
-    }
-
-    if let Ok(cwd) = env::current_dir() {
-        candidates.push(cwd.join("openclaw").join("openclaw.mjs"));
-        candidates.push(cwd.join("..").join("openclaw").join("openclaw.mjs"));
-        candidates.push(
-            cwd.join("..")
-                .join("AI_For_MLX-Pilot")
-                .join("openclaw")
-                .join("openclaw.mjs"),
-        );
-    }
-
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    if let Some(repo_root) = manifest_dir.parent().and_then(|value| value.parent()) {
-        if let Some(ai_root) = repo_root.parent() {
-            candidates.push(ai_root.join("openclaw").join("openclaw.mjs"));
-            candidates.push(
-                ai_root
-                    .join("AI_For_MLX-Pilot")
-                    .join("openclaw")
-                    .join("openclaw.mjs"),
-            );
-        }
-    }
-
-    if let Some(home) = home_dir() {
-        candidates.push(home.join("openclaw").join("openclaw.mjs"));
-        candidates.push(home.join("prod").join("openclaw").join("openclaw.mjs"));
-        candidates.push(
-            home.join("mlx-ollama-pilot")
-                .join("openclaw")
-                .join("openclaw.mjs"),
-        );
-    }
-
-    let existing = dedupe_paths(candidates)
-        .into_iter()
-        .filter(|candidate| candidate.exists())
-        .collect::<Vec<_>>();
-
-    existing
-        .iter()
-        .find(|candidate| {
-            candidate
-                .parent()
-                .map(|root| root.join("deploy").join("data").exists())
-                .unwrap_or(false)
-        })
-        .cloned()
-        .or_else(|| existing.into_iter().next())
-        .unwrap_or_else(|| current.clone())
-}
-
-fn resolve_openclaw_state_dir(current: &PathBuf, cli_path: &PathBuf) -> PathBuf {
-    if current.exists() {
-        return current.clone();
-    }
-
-    let mut candidates = Vec::new();
-
-    if let Some(root) = cli_path.parent() {
-        candidates.push(root.join("deploy").join("data"));
-        candidates.push(root.join("state"));
-    }
-
-    let fallback = default_openclaw_state_dir();
-    candidates.push(fallback.clone());
-
-    first_existing_path(candidates).unwrap_or_else(|| {
-        cli_path
-            .parent()
-            .map(|root| root.join("deploy").join("data"))
-            .unwrap_or(fallback)
-    })
 }
 
 fn first_existing_path(candidates: Vec<PathBuf>) -> Option<PathBuf> {
@@ -1365,10 +1218,6 @@ fn default_models_dir() -> PathBuf {
         return home.join("mlx-pilot-models");
     }
     PathBuf::from(".").join("models")
-}
-
-fn default_openclaw_state_dir() -> PathBuf {
-    default_app_data_dir().join("openclaw").join("state")
 }
 
 fn default_mlx_command() -> String {
@@ -1775,6 +1624,26 @@ fn default_agent_approval_mode() -> String {
 
 fn default_agent_node_manager() -> String {
     "npm".to_string()
+}
+
+fn default_agent_runtime_variant() -> String {
+    "classic".to_string()
+}
+
+fn default_memory_profile() -> String {
+    "balanced".to_string()
+}
+
+fn default_agent_memory_snapshot_mode() -> String {
+    "session".to_string()
+}
+
+fn default_toolset_id() -> String {
+    "general".to_string()
+}
+
+fn default_gateway_mode() -> String {
+    "local_only".to_string()
 }
 
 fn default_tool_profile() -> String {

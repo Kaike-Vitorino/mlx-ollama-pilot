@@ -18,6 +18,6 @@ pub use loader::{DiscoveredSkill, SkillLimits, SkillLoader, SkillPrompt};
 pub use resolver::{RegistrySkillMeta, ResolverError, SkillResolver};
 pub use types::{
     normalize_config_key, normalize_env_key, FilesystemScope, InstallKind, InstallSpec,
-    NetworkScope, RequirementContext, SkillCapabilities, SkillPackage, SkillRequirements,
-    SkillSource, TrustLevel,
+    NetworkScope, RequirementContext, SkillCapabilities, SkillFormat, SkillPackage, SkillPolicy,
+    SkillRequirements, SkillSource, TrustLevel,
 };

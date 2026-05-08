@@ -366,7 +366,7 @@ impl ChannelService {
             .parent()
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("."));
-        let registry = ChannelRegistry::openclaw_compat();
+        let registry = ChannelRegistry::compatibility_catalog();
         let mut adapters: HashMap<String, Arc<dyn ChannelAdapter>> = HashMap::new();
 
         adapters.insert("whatsapp".to_string(), Arc::new(WhatsAppAdapter));

@@ -4,18 +4,16 @@ mod catalog;
 mod channels;
 mod chat_stream;
 mod config;
-mod openclaw;
 mod plugins;
 mod runtime_doctor;
 mod secrets_vault;
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::{self, OpenOptions};
-use std::io::{self, Read, Seek, SeekFrom};
+use std::fs;
+use std::io;
 use std::path::{Path as FsPath, PathBuf as FsPathBuf};
-use std::process::{Command, Output, Stdio};
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use axum::body::Body;
 use axum::extract::{Path as AxumPath, Query, State};
@@ -31,24 +29,14 @@ use catalog::{
 use chat_stream::{spawn_chat_stream, ChatRuntimeConfig, ChatStreamEvent};
 use config::AppConfig;
 use llamacpp_provider::{LlamaCppProvider, LlamaCppProviderConfig};
-use mlx_ollama_core::{
-    ChatMessage, ChatRequest, ChatResponse, GenerationOptions, MessageRole, ModelDescriptor,
-    ModelProvider, ProviderError,
-};
+use mlx_ollama_core::{ChatRequest, ChatResponse, ModelDescriptor, ModelProvider, ProviderError};
+use mlx_agent_skills::normalize_env_key;
 use mlx_provider::{MlxProvider, MlxProviderConfig};
 use ollama_provider::{OllamaProvider, OllamaProviderConfig};
-use openclaw::{
-    OpenClawChatRequest, OpenClawChatResponse, OpenClawCloudModel, OpenClawCurrentModel,
-    OpenClawError, OpenClawLogChunkResponse, OpenClawLogQuery, OpenClawModelsStateResponse,
-    OpenClawObservabilityResponse, OpenClawRuntime, OpenClawRuntimeActionRequest,
-    OpenClawRuntimeActionResponse, OpenClawRuntimeConfig, OpenClawRuntimeStateResponse,
-    OpenClawSetModelRequest, OpenClawStatusResponse,
-};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::Value;
 use tokio::net::TcpListener;
-use tokio::process::{Child as TokioChild, Command as TokioCommand};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt;
 use tower_http::cors::CorsLayer;
@@ -70,11 +58,8 @@ struct AppState {
     llamacpp_provider: Arc<LlamaCppProvider>,
     ollama_provider: Arc<OllamaProvider>,
     brave_api_key: Option<String>,
-    openclaw_local_provider: Arc<MlxProvider>,
     catalog: Arc<CatalogService>,
     chat_runtime: ChatRuntimeConfig,
-    openclaw_runtime: Arc<OpenClawRuntime>,
-    pub nanobot_runtime: Arc<Mutex<NanoBotRuntimeManager>>,
     pub session_store: Arc<mlx_agent_core::SessionStore>,
     pub agent_state: agent_api::AgentState,
     pub plugin_manager: Arc<PluginManager>,
@@ -119,7 +104,6 @@ enum RoutedProvider {
 const WORKSPACE_MARKERS: &[&str] = &[
     "skills",
     ".claude/skills",
-    ".openclaw/skills",
     ".codex/skills",
 ];
 
@@ -174,7 +158,6 @@ struct RoutedModel {
 enum AppError {
     Provider(ProviderError),
     Catalog(CatalogError),
-    OpenClaw(OpenClawError),
     NotFound(String),
     InvalidChannelRequest {
         status: StatusCode,
@@ -195,18 +178,11 @@ impl From<CatalogError> for AppError {
     }
 }
 
-impl From<OpenClawError> for AppError {
-    fn from(value: OpenClawError) -> Self {
-        Self::OpenClaw(value)
-    }
-}
-
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let (status, message, error_code) = match self {
             AppError::Provider(error) => map_provider_error(error),
             AppError::Catalog(error) => map_catalog_error(error),
-            AppError::OpenClaw(error) => map_openclaw_error(error),
             AppError::NotFound(message) => (StatusCode::NOT_FOUND, message, None),
             AppError::InvalidChannelRequest {
                 status,
@@ -269,29 +245,6 @@ fn map_catalog_error(error: CatalogError) -> (StatusCode, String, Option<String>
     }
 }
 
-fn map_openclaw_error(error: OpenClawError) -> (StatusCode, String, Option<String>) {
-    match error {
-        OpenClawError::BadRequest(message) => (StatusCode::BAD_REQUEST, message, None),
-        OpenClawError::Io { context, source } => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("{context}: {source}"),
-            None,
-        ),
-        OpenClawError::CommandFailed { command, stderr } => (
-            StatusCode::BAD_GATEWAY,
-            format!("command failed: {command}; stderr: {stderr}"),
-            None,
-        ),
-        OpenClawError::Parse { details } => (StatusCode::BAD_GATEWAY, details, None),
-        OpenClawError::Timeout { seconds } => (
-            StatusCode::GATEWAY_TIMEOUT,
-            format!("timeout ao consultar openclaw ({seconds}s)"),
-            None,
-        ),
-        OpenClawError::Unavailable(message) => (StatusCode::SERVICE_UNAVAILABLE, message, None),
-    }
-}
-
 #[derive(Serialize)]
 struct ErrorBody {
     error: String,
@@ -336,28 +289,6 @@ struct HealthBody {
     provider: &'static str,
 }
 
-#[derive(Debug, Serialize)]
-struct OpenClawLocalModel {
-    id: String,
-    name: String,
-    path: String,
-}
-
-#[derive(Debug, Serialize)]
-struct OpenClawModelsResponse {
-    session_key: String,
-    current: OpenClawCurrentModel,
-    cloud_models: Vec<OpenClawCloudModel>,
-    local_models: Vec<OpenClawLocalModel>,
-}
-
-#[derive(Debug, Deserialize)]
-struct OpenClawModelRequest {
-    source: String,
-    model_reference: Option<String>,
-    local_model_id: Option<String>,
-}
-
 #[derive(Debug, Deserialize)]
 struct BraveSearchRequest {
     query: String,
@@ -380,17 +311,17 @@ struct BraveSearchResponse {
 }
 
 #[derive(Debug, Deserialize)]
-struct OpenClawEnvironmentQuery {
+struct EnvironmentQuery {
     reveal: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
-struct OpenClawEnvironmentUpdateRequest {
+struct EnvironmentUpdateRequest {
     values: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Serialize)]
-struct OpenClawEnvironmentVariable {
+struct EnvironmentVariableView {
     key: String,
     label: String,
     value: String,
@@ -401,12 +332,12 @@ struct OpenClawEnvironmentVariable {
 }
 
 #[derive(Debug, Serialize)]
-struct OpenClawEnvironmentResponse {
+struct EnvironmentResponse {
     env_path: String,
     env_exists: bool,
     env_example_path: String,
     env_example_exists: bool,
-    variables: Vec<OpenClawEnvironmentVariable>,
+    variables: Vec<EnvironmentVariableView>,
 }
 
 pub async fn run() -> anyhow::Result<()> {
@@ -467,7 +398,6 @@ pub async fn run() -> anyhow::Result<()> {
         llamacpp_provider,
         ollama_provider,
         brave_api_key: cfg.brave_api_key.clone(),
-        openclaw_local_provider: mlx_provider,
         catalog,
         chat_runtime: ChatRuntimeConfig {
             models_dir: cfg.models_dir.clone(),
@@ -482,18 +412,6 @@ pub async fn run() -> anyhow::Result<()> {
             airllm_runner: cfg.mlx_airllm_runner.clone(),
             airllm_backend: cfg.mlx_airllm_backend.clone(),
         },
-        openclaw_runtime: Arc::new(OpenClawRuntime::new(OpenClawRuntimeConfig {
-            node_command: cfg.openclaw_node_command.clone(),
-            cli_path: cfg.openclaw_cli_path.clone(),
-            state_dir: cfg.openclaw_state_dir.clone(),
-            gateway_token: cfg.openclaw_gateway_token.clone(),
-            session_key: cfg.openclaw_session_key.clone(),
-            timeout: cfg.openclaw_timeout,
-            gateway_log: cfg.openclaw_gateway_log.clone(),
-            error_log: cfg.openclaw_error_log.clone(),
-            sync_log: cfg.openclaw_sync_log.clone(),
-        })),
-        nanobot_runtime: Arc::new(Mutex::new(NanoBotRuntimeManager::new())),
         agent_state: agent_api::AgentState {
             default_workspace: resolve_default_agent_workspace(),
             approval: Arc::new(mlx_agent_core::approval::DefaultApprovalService::new()),
@@ -501,12 +419,16 @@ pub async fn run() -> anyhow::Result<()> {
             audit: Arc::new(mlx_agent_core::AuditLog::new(
                 std::env::temp_dir().join("mlx-pilot-audit"),
             )),
-            memory: Arc::new(mlx_agent_core::MemoryStore::new(
-                AppConfig::get_settings_path()
-                    .parent()
-                    .unwrap_or(std::path::Path::new("."))
-                    .join("memory"),
-            )),
+            memory: Arc::new(
+                mlx_agent_core::MemoryStore::new(
+                    AppConfig::get_settings_path()
+                        .parent()
+                        .unwrap_or(std::path::Path::new("."))
+                        .join("memory"),
+                )
+                .await
+                .expect("Failed to initialize memory store"),
+            ),
             budget_tracker: Arc::new(tokio::sync::RwLock::new(BTreeMap::new())),
         },
         session_store: Arc::new(
@@ -536,39 +458,9 @@ pub async fn run() -> anyhow::Result<()> {
         .route("/chat", post(chat))
         .route("/chat/stream", post(chat_stream))
         .route("/web/brave/search", post(brave_web_search))
-        .route("/openclaw/status", get(openclaw_status))
-        .route("/openclaw/observability", get(openclaw_observability))
-        .route(
-            "/openclaw/runtime",
-            get(openclaw_runtime_status).post(openclaw_runtime_action),
-        )
-        .route("/openclaw/models", get(openclaw_models))
-        .route("/openclaw/logs", get(openclaw_logs))
-        .route("/openclaw/model", post(openclaw_set_model))
-        .route("/openclaw/chat", post(openclaw_chat))
-        .route("/openclaw/install", post(openclaw_install))
         .route(
             "/environment",
-            get(openclaw_environment).post(openclaw_update_environment),
-        )
-        .route(
-            "/openclaw/environment",
-            get(openclaw_environment).post(openclaw_update_environment),
-        )
-        .route("/nanobot/status", get(nanobot_status))
-        .route("/nanobot/onboard", post(nanobot_onboard))
-        .route("/nanobot/install", post(nanobot_install))
-        .route(
-            "/nanobot/runtime",
-            get(nanobot_runtime_status).post(nanobot_runtime_action),
-        )
-        .route("/nanobot/chat", post(nanobot_chat))
-        .route("/nanobot/logs", get(nanobot_logs))
-        .route("/nanobot/observability", get(nanobot_observability))
-        .route("/nanobot/models", get(nanobot_models))
-        .route(
-            "/nanobot/model",
-            get(nanobot_get_model).post(nanobot_set_model),
+            get(environment).post(update_environment),
         )
         .route("/catalog/sources", get(catalog_sources))
         .route("/catalog/models", get(catalog_models))
@@ -584,6 +476,10 @@ pub async fn run() -> anyhow::Result<()> {
         // ── Agent API ──
         .route("/agent/run", post(agent_api::agent_run))
         .route("/agent/providers", get(agent_api::agent_providers))
+        .route(
+            "/agent/provider-profiles",
+            get(agent_api::agent_provider_profiles),
+        )
         .route(
             "/agent/config",
             get(agent_api::agent_get_config).post(agent_api::agent_update_config),
@@ -606,6 +502,7 @@ pub async fn run() -> anyhow::Result<()> {
         .route("/agent/skills/reload", post(agent_api::agent_reload_skills))
         .route("/agent/tools", get(agent_api::agent_list_tools))
         .route("/agent/tools/catalog", get(agent_api::agent_tools_catalog))
+        .route("/agent/toolsets", get(agent_api::agent_toolsets))
         .route("/agent/compat/report", get(agent_api::agent_compat_report))
         .route(
             "/agent/tools/effective-policy",
@@ -1538,7 +1435,7 @@ async fn brave_web_search(
         .unwrap_or_default()
         .to_string();
     let shared_env_api_key = if request_api_key.is_empty() {
-        let env_values = read_openclaw_environment_values()?;
+        let env_values = read_environment_values()?;
         resolve_environment_value(&env_values, "BRAVE_API_KEY").unwrap_or_default()
     } else {
         String::new()
@@ -2235,1494 +2132,23 @@ async fn catalog_cancel_download(
     Ok(Json(cancelled))
 }
 
-async fn openclaw_status(
-    State(state): State<AppState>,
-) -> Result<Json<OpenClawStatusResponse>, AppError> {
-    Ok(Json(state.openclaw_runtime.status().await))
-}
-
-async fn openclaw_observability(
-    State(state): State<AppState>,
-) -> Result<Json<OpenClawObservabilityResponse>, AppError> {
-    let response = state.openclaw_runtime.observability().await?;
-    Ok(Json(response))
-}
-
-async fn openclaw_runtime_status(
-    State(state): State<AppState>,
-) -> Result<Json<OpenClawRuntimeStateResponse>, AppError> {
-    let status = state.openclaw_runtime.runtime_status().await?;
-    Ok(Json(status))
-}
-
-async fn openclaw_runtime_action(
-    State(state): State<AppState>,
-    Json(request): Json<OpenClawRuntimeActionRequest>,
-) -> Result<Json<OpenClawRuntimeActionResponse>, AppError> {
-    let response = state.openclaw_runtime.runtime_action(request).await?;
-    Ok(Json(response))
-}
-
-async fn openclaw_logs(
-    State(state): State<AppState>,
-    Query(query): Query<OpenClawLogQuery>,
-) -> Result<Json<OpenClawLogChunkResponse>, AppError> {
-    let chunk = state.openclaw_runtime.read_logs(query).await?;
-    Ok(Json(chunk))
-}
-
-async fn openclaw_models(
-    State(state): State<AppState>,
-) -> Result<Json<OpenClawModelsResponse>, AppError> {
-    let model_state: OpenClawModelsStateResponse = state.openclaw_runtime.models_state().await?;
-    let local_models = state.openclaw_local_provider.list_models().await?;
-
-    let mapped_local = local_models
-        .into_iter()
-        .map(|entry| OpenClawLocalModel {
-            id: entry.id,
-            name: entry.name,
-            path: entry.path,
-        })
-        .collect::<Vec<_>>();
-
-    Ok(Json(OpenClawModelsResponse {
-        session_key: model_state.session_key,
-        current: model_state.current,
-        cloud_models: model_state.cloud_models,
-        local_models: mapped_local,
-    }))
-}
-
-async fn openclaw_set_model(
-    State(state): State<AppState>,
-    Json(request): Json<OpenClawModelRequest>,
-) -> Result<Json<OpenClawCurrentModel>, AppError> {
-    let source = request.source.trim().to_lowercase();
-
-    if source == "cloud" {
-        let result = state
-            .openclaw_runtime
-            .set_model(OpenClawSetModelRequest {
-                source,
-                model_reference: request.model_reference,
-                local_model_path: None,
-                local_model_name: None,
-            })
-            .await?;
-        return Ok(Json(result));
-    }
-
-    if source == "local" {
-        let model_id = request
-            .local_model_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| {
-                AppError::OpenClaw(OpenClawError::BadRequest(
-                    "local_model_id e obrigatorio para source=local".to_string(),
-                ))
-            })?;
-
-        let local_models = state.openclaw_local_provider.list_models().await?;
-        let selected = local_models
-            .into_iter()
-            .find(|entry| entry.id == model_id)
-            .ok_or_else(|| {
-                AppError::NotFound(format!("modelo local '{model_id}' nao encontrado"))
-            })?;
-
-        let result = state
-            .openclaw_runtime
-            .set_model(OpenClawSetModelRequest {
-                source,
-                model_reference: None,
-                local_model_path: Some(selected.path),
-                local_model_name: Some(selected.name),
-            })
-            .await?;
-        return Ok(Json(result));
-    }
-
-    Err(AppError::OpenClaw(OpenClawError::BadRequest(
-        "source invalido: use cloud ou local".to_string(),
-    )))
-}
-
-async fn openclaw_chat(
-    State(state): State<AppState>,
-    Json(request): Json<OpenClawChatRequest>,
-) -> Result<Json<OpenClawChatResponse>, AppError> {
-    let response = state.openclaw_runtime.chat(request).await?;
-    Ok(Json(response))
-}
-
-#[derive(Serialize)]
-struct InstallResponse {
-    message: String,
-}
-
-#[derive(Serialize)]
-struct NanoBotStatusResponse {
-    installed: bool,
-    command: String,
-    version: Option<String>,
-    config_path: String,
-    config_exists: bool,
-    workspace_path: String,
-    workspace_exists: bool,
-    message: String,
-    raw_status: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-struct NanoBotRuntimeStateResponse {
-    service_status: String,
-    service_state: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pid: Option<u64>,
-    rpc_ok: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    port_status: Option<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    issues: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    uptime_seconds: Option<u64>,
-    log_path: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct NanoBotRuntimeActionRequest {
-    action: String,
-}
-
-#[derive(Debug, Serialize)]
-struct NanoBotRuntimeActionResponse {
-    action: String,
-    runtime: NanoBotRuntimeStateResponse,
-}
-
-#[derive(Debug, Deserialize)]
-struct NanoBotChatRequest {
-    message: String,
-    session_key: Option<String>,
-    timeout_ms: Option<u64>,
-}
-
-#[derive(Debug, Serialize)]
-struct NanoBotUsage {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    input: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    output: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    cache_read: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    cache_write: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    total: Option<u64>,
-}
-
-#[derive(Debug, Serialize)]
-struct NanoBotChatResponse {
-    run_id: Option<String>,
-    status: Option<String>,
-    summary: Option<String>,
-    reply: String,
-    payloads: Vec<String>,
-    duration_ms: Option<u64>,
-    provider: Option<String>,
-    model: Option<String>,
-    usage: Option<NanoBotUsage>,
-    skills: Vec<String>,
-    tools: Vec<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct NanoBotLogQuery {
-    stream: Option<String>,
-    cursor: Option<u64>,
-    max_bytes: Option<usize>,
-}
-
-#[derive(Debug, Serialize)]
-struct NanoBotLogChunkResponse {
-    stream: String,
-    path: String,
-    exists: bool,
-    cursor: u64,
-    next_cursor: u64,
-    file_size: u64,
-    truncated: bool,
-    content: String,
-}
-
-#[derive(Debug, Serialize)]
-struct NanoBotObservabilityResponse {
-    session_key: String,
-    provider: Option<String>,
-    model: Option<String>,
-    usage: Option<NanoBotUsage>,
-    skills: Vec<String>,
-    tools: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    updated_at: Option<u64>,
-}
-
-#[derive(Debug, Deserialize)]
-struct NanoBotSetModelRequest {
-    source: Option<String>,
-    model_reference: Option<String>,
-    local_model_id: Option<String>,
-    model: Option<String>,
-}
-
-#[derive(Debug)]
-struct NanoBotProcessHandle {
-    child: TokioChild,
-    pid: u32,
-    started_at: Instant,
-}
-
-#[derive(Debug)]
-struct NanoBotRuntimeManager {
-    process: Option<NanoBotProcessHandle>,
-    last_error: Option<String>,
-}
-
-impl NanoBotRuntimeManager {
-    fn new() -> Self {
-        Self {
-            process: None,
-            last_error: None,
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-struct NanoBotCommandSpec {
-    program: String,
-    args: Vec<String>,
-}
-
-impl NanoBotCommandSpec {
-    fn display(&self) -> String {
-        if self.args.is_empty() {
-            return self.program.clone();
-        }
-        format!("{} {}", self.program, self.args.join(" "))
-    }
-}
-
-async fn openclaw_install(
-    State(state): State<AppState>,
-) -> Result<Json<InstallResponse>, AppError> {
-    let message = state.openclaw_runtime.install().await?;
-    Ok(Json(InstallResponse { message }))
-}
-
-async fn openclaw_environment(
-    Query(query): Query<OpenClawEnvironmentQuery>,
-) -> Result<Json<OpenClawEnvironmentResponse>, AppError> {
+async fn environment(
+    Query(query): Query<EnvironmentQuery>,
+) -> Result<Json<EnvironmentResponse>, AppError> {
     let reveal = query.reveal.unwrap_or(false);
-    let response = build_openclaw_environment_response(reveal)?;
+    let response = build_environment_response(reveal)?;
     Ok(Json(response))
 }
 
-async fn openclaw_update_environment(
-    Json(request): Json<OpenClawEnvironmentUpdateRequest>,
-) -> Result<Json<OpenClawEnvironmentResponse>, AppError> {
-    update_openclaw_environment_file(request.values)?;
-    sync_nanobot_model_provider_from_environment()?;
-    let response = build_openclaw_environment_response(false)?;
+async fn update_environment(
+    Json(request): Json<EnvironmentUpdateRequest>,
+) -> Result<Json<EnvironmentResponse>, AppError> {
+    update_environment_file(request.values)?;
+    let response = build_environment_response(false)?;
     Ok(Json(response))
 }
 
-async fn nanobot_status() -> Result<Json<NanoBotStatusResponse>, AppError> {
-    let cfg = AppConfig::load_settings().apply_env();
-    let spec = resolve_nanobot_command(&cfg);
-    let command_cwd = resolve_nanobot_command_cwd(&cfg);
-    let config_path = nanobot_config_path();
-    let workspace_path =
-        resolve_nanobot_workspace_from_config().unwrap_or_else(nanobot_workspace_path);
-
-    let version = run_nanobot_command(&spec, &["--version"], command_cwd.as_deref())
-        .ok()
-        .filter(|output| output.status.success())
-        .map(|output| {
-            let text = decode_stdout(&output);
-            text.lines().next().map(str::trim).unwrap_or("").to_string()
-        })
-        .filter(|value| !value.is_empty());
-
-    let status_output = run_nanobot_command(&spec, &["status"], command_cwd.as_deref())
-        .ok()
-        .filter(|output| output.status.success())
-        .map(|output| {
-            let stdout = decode_stdout(&output);
-            if stdout.is_empty() {
-                decode_command_output(&output)
-            } else {
-                stdout
-            }
-        })
-        .filter(|value| !value.is_empty());
-
-    let installed = version.is_some();
-    let message = if installed {
-        "NanoBot detectado. Se o config ainda nao existe, inicialize com o botao onboard."
-            .to_string()
-    } else {
-        "NanoBot nao encontrado no ambiente atual. Verifique o caminho/comando e rode a instalacao."
-            .to_string()
-    };
-
-    Ok(Json(NanoBotStatusResponse {
-        installed,
-        command: spec.display(),
-        version,
-        config_path: config_path.display().to_string(),
-        config_exists: config_path.exists(),
-        workspace_path: workspace_path.display().to_string(),
-        workspace_exists: workspace_path.exists(),
-        message,
-        raw_status: status_output,
-    }))
-}
-
-async fn nanobot_onboard() -> Result<Json<InstallResponse>, AppError> {
-    let cfg = AppConfig::load_settings().apply_env();
-    let spec = resolve_nanobot_command(&cfg);
-    let command_cwd = resolve_nanobot_command_cwd(&cfg);
-    let config_path = nanobot_config_path();
-
-    if config_path.exists() {
-        return Ok(Json(InstallResponse {
-            message: format!(
-                "Configuracao ja existe em {}. Para evitar prompt interativo, o onboard automatico foi ignorado.",
-                config_path.display()
-            ),
-        }));
-    }
-
-    let output =
-        run_nanobot_command(&spec, &["onboard"], command_cwd.as_deref()).map_err(|error| {
-            AppError::Provider(ProviderError::Io {
-                context: "Falha ao executar nanobot onboard".to_string(),
-                source: error,
-            })
-        })?;
-
-    if output.status.success() {
-        return Ok(Json(InstallResponse {
-            message: format!(
-                "NanoBot inicializado com sucesso em {}.",
-                config_path.display()
-            ),
-        }));
-    }
-
-    Err(AppError::Provider(ProviderError::CommandFailed {
-        command: format!("{} onboard", spec.display()),
-        stderr: decode_command_output(&output),
-    }))
-}
-
-async fn nanobot_install(
-    State(_state): State<AppState>,
-) -> Result<Json<InstallResponse>, AppError> {
-    let cfg = AppConfig::load_settings().apply_env();
-    let repo_dir = resolve_nanobot_repo_dir(&cfg)?;
-    let repo_parent = repo_dir
-        .parent()
-        .ok_or_else(|| {
-            AppError::Provider(ProviderError::Unavailable {
-                details: "Nao foi possivel determinar diretorio pai do NanoBot.".to_string(),
-            })
-        })?
-        .to_path_buf();
-
-    std::fs::create_dir_all(&repo_parent).map_err(|error| {
-        AppError::Provider(ProviderError::Io {
-            context: "Falha ao criar diretorio pai do NanoBot".to_string(),
-            source: error,
-        })
-    })?;
-
-    if repo_dir.join(".git").exists() {
-        let output = Command::new("git")
-            .arg("-C")
-            .arg(&repo_dir)
-            .arg("pull")
-            .arg("--ff-only")
-            .output()
-            .map_err(|error| {
-                AppError::Provider(ProviderError::Io {
-                    context: "Falha ao atualizar repositorio NanoBot".to_string(),
-                    source: error,
-                })
-            })?;
-
-        if !output.status.success() {
-            return Err(AppError::Provider(ProviderError::CommandFailed {
-                command: format!("git -C {} pull --ff-only", repo_dir.display()),
-                stderr: decode_command_output(&output),
-            }));
-        }
-    } else {
-        if repo_dir.exists() {
-            let has_files = std::fs::read_dir(&repo_dir)
-                .map_err(|error| {
-                    AppError::Provider(ProviderError::Io {
-                        context: "Falha ao ler diretorio de destino do NanoBot".to_string(),
-                        source: error,
-                    })
-                })?
-                .next()
-                .is_some();
-            if has_files {
-                return Err(AppError::Provider(ProviderError::Unavailable {
-                    details: format!(
-                        "O diretorio {} ja existe e nao esta vazio. Escolha outro caminho NanoBot CLI ou limpe o diretorio.",
-                        repo_dir.display()
-                    ),
-                }));
-            }
-        }
-
-        let output = Command::new("git")
-            .arg("clone")
-            .arg("https://github.com/HKUDS/nanobot.git")
-            .arg(&repo_dir)
-            .output()
-            .map_err(|error| {
-                AppError::Provider(ProviderError::Io {
-                    context: "Falha ao clonar repositorio NanoBot".to_string(),
-                    source: error,
-                })
-            })?;
-
-        if !output.status.success() {
-            return Err(AppError::Provider(ProviderError::CommandFailed {
-                command: format!(
-                    "git clone https://github.com/HKUDS/nanobot.git {}",
-                    repo_dir.display()
-                ),
-                stderr: decode_command_output(&output),
-            }));
-        }
-    }
-
-    let venv_dir = repo_dir.join(".venv");
-    if !venv_dir.join("bin").join("python").exists() {
-        let venv_output = Command::new("python3")
-            .arg("-m")
-            .arg("venv")
-            .arg(&venv_dir)
-            .output()
-            .map_err(|error| {
-                AppError::Provider(ProviderError::Io {
-                    context: "Falha ao criar venv local do NanoBot".to_string(),
-                    source: error,
-                })
-            })?;
-
-        if !venv_output.status.success() {
-            return Err(AppError::Provider(ProviderError::CommandFailed {
-                command: format!("python3 -m venv {}", venv_dir.display()),
-                stderr: decode_command_output(&venv_output),
-            }));
-        }
-    }
-
-    let venv_python = venv_dir.join("bin").join("python");
-    let pip_upgrade = Command::new(&venv_python)
-        .arg("-m")
-        .arg("pip")
-        .arg("install")
-        .arg("--upgrade")
-        .arg("pip")
-        .output()
-        .map_err(|error| {
-            AppError::Provider(ProviderError::Io {
-                context: "Falha ao atualizar pip no venv do NanoBot".to_string(),
-                source: error,
-            })
-        })?;
-
-    if !pip_upgrade.status.success() {
-        return Err(AppError::Provider(ProviderError::CommandFailed {
-            command: format!("{} -m pip install --upgrade pip", venv_python.display()),
-            stderr: decode_command_output(&pip_upgrade),
-        }));
-    }
-
-    let install_output = Command::new(&venv_python)
-        .arg("-m")
-        .arg("pip")
-        .arg("install")
-        .arg("-e")
-        .arg(&repo_dir)
-        .output()
-        .map_err(|error| {
-            AppError::Provider(ProviderError::Io {
-                context: "Falha ao executar instalacao pip do NanoBot".to_string(),
-                source: error,
-            })
-        })?;
-
-    if !install_output.status.success() {
-        return Err(AppError::Provider(ProviderError::CommandFailed {
-            command: format!(
-                "{} -m pip install -e {}",
-                venv_python.display(),
-                repo_dir.display()
-            ),
-            stderr: decode_command_output(&install_output),
-        }));
-    }
-
-    Ok(Json(InstallResponse {
-        message: format!(
-            "NanoBot pronto. Repo: {}. CLI ativa: {}. Proximo passo: execute o onboard para criar ~/.nanobot/config.json.",
-            repo_dir.display(),
-            repo_dir.join(".venv/bin/nanobot").display()
-        ),
-    }))
-}
-
-async fn nanobot_runtime_status(
-    State(state): State<AppState>,
-) -> Result<Json<NanoBotRuntimeStateResponse>, AppError> {
-    let cfg = AppConfig::load_settings().apply_env();
-    let spec = resolve_nanobot_command(&cfg);
-    let command_cwd = resolve_nanobot_command_cwd(&cfg);
-
-    let mut runtime = state.nanobot_runtime.lock().await;
-    refresh_nanobot_process_state(&mut runtime);
-    let response = build_nanobot_runtime_snapshot(&spec, command_cwd.as_deref(), &runtime);
-    Ok(Json(response))
-}
-
-async fn nanobot_runtime_action(
-    State(state): State<AppState>,
-    Json(request): Json<NanoBotRuntimeActionRequest>,
-) -> Result<Json<NanoBotRuntimeActionResponse>, AppError> {
-    let action = request.action.trim().to_lowercase();
-    if !matches!(action.as_str(), "start" | "stop" | "restart") {
-        return Err(AppError::Provider(ProviderError::InvalidRequest {
-            details: "acao invalida para runtime: use start, stop ou restart".to_string(),
-        }));
-    }
-
-    let cfg = AppConfig::load_settings().apply_env();
-    let spec = resolve_nanobot_command(&cfg);
-    let command_cwd = resolve_nanobot_command_cwd(&cfg);
-
-    let mut runtime = state.nanobot_runtime.lock().await;
-    refresh_nanobot_process_state(&mut runtime);
-
-    match action.as_str() {
-        "start" => {
-            if runtime.process.is_none() {
-                spawn_nanobot_gateway(&spec, command_cwd.as_deref(), &mut runtime).await?;
-            }
-        }
-        "stop" => {
-            stop_nanobot_gateway(&mut runtime).await?;
-        }
-        "restart" => {
-            stop_nanobot_gateway(&mut runtime).await?;
-            spawn_nanobot_gateway(&spec, command_cwd.as_deref(), &mut runtime).await?;
-        }
-        _ => {}
-    }
-
-    refresh_nanobot_process_state(&mut runtime);
-    let snapshot = build_nanobot_runtime_snapshot(&spec, command_cwd.as_deref(), &runtime);
-    Ok(Json(NanoBotRuntimeActionResponse {
-        action,
-        runtime: snapshot,
-    }))
-}
-
-async fn nanobot_chat(
-    State(state): State<AppState>,
-    Json(request): Json<NanoBotChatRequest>,
-) -> Result<Json<NanoBotChatResponse>, AppError> {
-    let message = request.message.trim();
-    if message.is_empty() {
-        return Err(AppError::Provider(ProviderError::InvalidRequest {
-            details: "message nao pode ser vazio".to_string(),
-        }));
-    }
-
-    let cfg = AppConfig::load_settings().apply_env();
-    let spec = resolve_nanobot_command(&cfg);
-    let command_cwd = resolve_nanobot_command_cwd(&cfg);
-    let session_key = request
-        .session_key
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or("mlx-pilot")
-        .to_string();
-
-    let mut nanobot_config = read_nanobot_config_json_optional()?;
-    let current_model = build_nanobot_model_response(nanobot_config.as_ref());
-
-    if current_model.source == "cloud" {
-        if let Some(config) = nanobot_config.as_mut() {
-            let changed = sync_nanobot_cloud_provider_from_environment(
-                config,
-                current_model.reference.as_str(),
-            )?;
-            if changed {
-                write_nanobot_config_json(config)?;
-            }
-        }
-    }
-
-    if current_model.source == "local" {
-        let local_model_path = nanobot_config
-            .as_ref()
-            .and_then(extract_nanobot_model_local_path_value)
-            .or_else(|| {
-                current_model
-                    .reference
-                    .strip_prefix("openai/")
-                    .map(ToString::to_string)
-            })
-            .or_else(|| {
-                current_model
-                    .model
-                    .strip_prefix("openai/")
-                    .map(ToString::to_string)
-            })
-            .or_else(|| {
-                let candidate = current_model.model.trim();
-                if candidate.is_empty() {
-                    None
-                } else {
-                    Some(candidate.to_string())
-                }
-            })
-            .ok_or_else(|| {
-                AppError::Provider(ProviderError::InvalidRequest {
-                    details: "modelo local NanoBot nao configurado corretamente".to_string(),
-                })
-            })?;
-
-        let started = Instant::now();
-        let chat_result = state
-            .openclaw_local_provider
-            .chat(ChatRequest {
-                model_id: local_model_path,
-                messages: vec![
-                    ChatMessage::text(MessageRole::System, "Responda somente com a resposta final para o usuario, sem tags <think>, sem logs e sem metricas."),
-                    ChatMessage::text(MessageRole::User, message),
-                ],
-                options: GenerationOptions {
-                    temperature: Some(0.15),
-                    max_tokens: Some(1024),
-                    top_p: None,
-                    airllm_enabled: None,
-                },
-            })
-            .await
-            .map_err(AppError::Provider)?;
-
-        let observability = build_nanobot_observability_snapshot()?;
-        let raw_reply = chat_result.message.content.trim().to_string();
-        let reply = {
-            let cleaned = sanitize_nanobot_cli_text(&raw_reply);
-            if cleaned.is_empty() {
-                raw_reply
-            } else {
-                cleaned
-            }
-        };
-        let mut payloads = Vec::new();
-        if let Some(raw) = chat_result.raw_output {
-            if !raw.trim().is_empty() {
-                payloads.push(raw);
-            }
-        }
-
-        return Ok(Json(NanoBotChatResponse {
-            run_id: None,
-            status: Some("completed".to_string()),
-            summary: Some(format!("session {} • local shared model", session_key)),
-            reply: if reply.is_empty() {
-                "(sem resposta textual)".to_string()
-            } else {
-                reply
-            },
-            payloads,
-            duration_ms: Some(started.elapsed().as_millis() as u64),
-            provider: Some(chat_result.provider),
-            model: Some(current_model.reference),
-            usage: Some(NanoBotUsage {
-                input: Some(chat_result.usage.prompt_tokens as u64),
-                output: Some(chat_result.usage.completion_tokens as u64),
-                cache_read: None,
-                cache_write: None,
-                total: Some(chat_result.usage.total_tokens as u64),
-            }),
-            skills: observability.skills,
-            tools: observability.tools,
-        }));
-    }
-
-    let mut args = vec![
-        "agent".to_string(),
-        "--message".to_string(),
-        message.to_string(),
-        "--session".to_string(),
-        session_key.clone(),
-        "--no-markdown".to_string(),
-    ];
-
-    if request.timeout_ms.is_some() {
-        // Mantemos compatibilidade de payload sem efeito direto no CLI atual.
-        args.push("--no-logs".to_string());
-    }
-
-    let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
-    let started = Instant::now();
-
-    let output =
-        run_nanobot_command(&spec, &arg_refs, command_cwd.as_deref()).map_err(|error| {
-            AppError::Provider(ProviderError::Io {
-                context: "Falha ao executar nanobot agent".to_string(),
-                source: error,
-            })
-        })?;
-
-    if !output.status.success() {
-        return Err(AppError::Provider(ProviderError::CommandFailed {
-            command: format!("{} {}", spec.display(), arg_refs.join(" ")),
-            stderr: decode_command_output(&output),
-        }));
-    }
-
-    let stdout = decode_stdout(&output);
-    let stderr = decode_stderr(&output);
-    let reply = extract_nanobot_reply(&stdout, &stderr);
-    let observability = build_nanobot_observability_snapshot()?;
-    let mut payloads = Vec::new();
-    if !stdout.is_empty() {
-        payloads.push(stdout);
-    }
-    if !stderr.is_empty() {
-        payloads.push(stderr);
-    }
-
-    Ok(Json(NanoBotChatResponse {
-        run_id: None,
-        status: Some("completed".to_string()),
-        summary: Some(format!("session {}", session_key)),
-        reply: if reply.is_empty() {
-            "(sem resposta textual)".to_string()
-        } else {
-            reply
-        },
-        payloads,
-        duration_ms: Some(started.elapsed().as_millis() as u64),
-        provider: observability.provider,
-        model: observability.model,
-        usage: None,
-        skills: observability.skills,
-        tools: observability.tools,
-    }))
-}
-
-async fn nanobot_logs(
-    Query(query): Query<NanoBotLogQuery>,
-) -> Result<Json<NanoBotLogChunkResponse>, AppError> {
-    let stream = normalize_nanobot_log_stream(query.stream.as_deref());
-    let path = nanobot_log_path_for_stream(&stream);
-    let cursor = query.cursor.unwrap_or(0);
-    let max_bytes = query.max_bytes.unwrap_or(65536).clamp(1024, 262_144);
-    let chunk = read_nanobot_log_chunk(&stream, &path, cursor, max_bytes)?;
-    Ok(Json(chunk))
-}
-
-async fn nanobot_observability() -> Result<Json<NanoBotObservabilityResponse>, AppError> {
-    let snapshot = build_nanobot_observability_snapshot()?;
-    Ok(Json(snapshot))
-}
-
-async fn nanobot_models(
-    State(state): State<AppState>,
-) -> Result<Json<OpenClawModelsResponse>, AppError> {
-    let default_cloud_models = shared_agent_default_cloud_models();
-    let mut cloud_models = default_cloud_models.clone();
-
-    if let Ok(model_state) = state.openclaw_runtime.models_state().await {
-        let mut merged = model_state.cloud_models;
-        for entry in default_cloud_models {
-            if !merged
-                .iter()
-                .any(|candidate| candidate.reference == entry.reference)
-            {
-                merged.push(entry);
-            }
-        }
-        cloud_models = merged;
-    }
-
-    let local_models = state.openclaw_local_provider.list_models().await?;
-    let mapped_local = local_models
-        .into_iter()
-        .map(|entry| OpenClawLocalModel {
-            id: entry.id,
-            name: entry.name,
-            path: entry.path,
-        })
-        .collect::<Vec<_>>();
-
-    let config = read_nanobot_config_json_optional()?;
-    let current = build_nanobot_model_response(config.as_ref());
-
-    if current.source == "cloud"
-        && !current.reference.trim().is_empty()
-        && !cloud_models
-            .iter()
-            .any(|entry| entry.reference == current.reference)
-    {
-        cloud_models.insert(
-            0,
-            OpenClawCloudModel {
-                reference: current.reference.clone(),
-                provider: current.provider.clone(),
-                model: current.model.clone(),
-                label: current.label.clone(),
-                alias: None,
-            },
-        );
-    }
-
-    Ok(Json(OpenClawModelsResponse {
-        session_key: "nanobot:main".to_string(),
-        current,
-        cloud_models,
-        local_models: mapped_local,
-    }))
-}
-
-async fn nanobot_get_model() -> Result<Json<OpenClawCurrentModel>, AppError> {
-    let config = read_nanobot_config_json_optional()?;
-    Ok(Json(build_nanobot_model_response(config.as_ref())))
-}
-
-async fn nanobot_set_model(
-    State(state): State<AppState>,
-    Json(request): Json<NanoBotSetModelRequest>,
-) -> Result<Json<OpenClawCurrentModel>, AppError> {
-    let mut config = read_nanobot_config_json_optional()?.unwrap_or_else(default_nanobot_config);
-
-    let source = request
-        .source
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_lowercase)
-        .unwrap_or_else(|| {
-            if request.local_model_id.is_some() {
-                "local".to_string()
-            } else {
-                "cloud".to_string()
-            }
-        });
-
-    if !matches!(source.as_str(), "cloud" | "local") {
-        return Err(AppError::Provider(ProviderError::InvalidRequest {
-            details: "source invalido: use cloud ou local".to_string(),
-        }));
-    }
-
-    if source == "local" {
-        let model_id = request
-            .local_model_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| {
-                AppError::Provider(ProviderError::InvalidRequest {
-                    details: "local_model_id e obrigatorio para source=local".to_string(),
-                })
-            })?;
-
-        let local_models = state.openclaw_local_provider.list_models().await?;
-        let selected = local_models
-            .into_iter()
-            .find(|entry| entry.id == model_id)
-            .ok_or_else(|| {
-                AppError::NotFound(format!("modelo local '{model_id}' nao encontrado"))
-            })?;
-
-        let model_reference = format!("openai/{}", selected.path);
-        set_json_string_at_path(
-            &mut config,
-            &["agents", "defaults", "model"],
-            model_reference.clone(),
-        );
-        set_json_string_at_path(
-            &mut config,
-            &["agents", "defaults", "model_source"],
-            "local".to_string(),
-        );
-        set_json_string_at_path(
-            &mut config,
-            &["agents", "defaults", "model_reference"],
-            model_reference,
-        );
-        set_json_string_at_path(
-            &mut config,
-            &["agents", "defaults", "model_local_id"],
-            selected.id,
-        );
-        set_json_string_at_path(
-            &mut config,
-            &["agents", "defaults", "model_local_name"],
-            selected.name,
-        );
-        set_json_string_at_path(
-            &mut config,
-            &["agents", "defaults", "model_local_path"],
-            selected.path,
-        );
-    } else {
-        let model_reference = request
-            .model_reference
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(ToString::to_string)
-            .or_else(|| {
-                request
-                    .model
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                    .map(ToString::to_string)
-            })
-            .ok_or_else(|| {
-                AppError::Provider(ProviderError::InvalidRequest {
-                    details: "model_reference e obrigatorio para source=cloud".to_string(),
-                })
-            })?;
-
-        set_json_string_at_path(
-            &mut config,
-            &["agents", "defaults", "model"],
-            model_reference.clone(),
-        );
-        set_json_string_at_path(
-            &mut config,
-            &["agents", "defaults", "model_source"],
-            "cloud".to_string(),
-        );
-        set_json_string_at_path(
-            &mut config,
-            &["agents", "defaults", "model_reference"],
-            model_reference.clone(),
-        );
-        let _ = sync_nanobot_cloud_provider_from_environment(&mut config, &model_reference)?;
-        remove_json_key_at_path(&mut config, &["agents", "defaults", "model_local_id"]);
-        remove_json_key_at_path(&mut config, &["agents", "defaults", "model_local_name"]);
-        remove_json_key_at_path(&mut config, &["agents", "defaults", "model_local_path"]);
-    }
-
-    if extract_nanobot_workspace_value(&config).is_none() {
-        set_json_string_at_path(
-            &mut config,
-            &["agents", "defaults", "workspace"],
-            nanobot_workspace_path().display().to_string(),
-        );
-    }
-
-    write_nanobot_config_json(&config)?;
-    Ok(Json(build_nanobot_model_response(Some(&config))))
-}
-
-fn resolve_nanobot_repo_dir(cfg: &AppConfig) -> Result<FsPathBuf, AppError> {
-    let raw = cfg.nanobot_cli_path.to_string_lossy().trim().to_string();
-    if raw.is_empty() {
-        return Err(AppError::Provider(ProviderError::Unavailable {
-            details: "Caminho do NanoBot nao definido.".to_string(),
-        }));
-    }
-
-    let candidate = FsPathBuf::from(&raw);
-    if candidate
-        .extension()
-        .and_then(|value| value.to_str())
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("py"))
-    {
-        return candidate
-            .parent()
-            .map(|parent| parent.to_path_buf())
-            .ok_or_else(|| {
-                AppError::Provider(ProviderError::Unavailable {
-                    details: "Caminho NanoBot .py invalido (sem diretorio pai).".to_string(),
-                })
-            });
-    }
-
-    if candidate.exists() {
-        if candidate.is_dir() {
-            return Ok(candidate);
-        }
-
-        return candidate
-            .parent()
-            .map(|parent| parent.to_path_buf())
-            .ok_or_else(|| {
-                AppError::Provider(ProviderError::Unavailable {
-                    details: "Caminho NanoBot invalido (sem diretorio pai).".to_string(),
-                })
-            });
-    }
-
-    if raw.contains('/') || raw.contains('\\') {
-        if candidate.extension().is_none() {
-            return Ok(candidate);
-        }
-
-        return candidate
-            .parent()
-            .map(|parent| parent.to_path_buf())
-            .ok_or_else(|| {
-                AppError::Provider(ProviderError::Unavailable {
-                    details: "Caminho NanoBot invalido (sem diretorio pai).".to_string(),
-                })
-            });
-    }
-
-    Err(AppError::Provider(ProviderError::Unavailable {
-        details: "Para instalar via clone, informe um caminho de pasta no campo NanoBot CLI (ex.: /Users/kaike/prod/nanobot).".to_string(),
-    }))
-}
-
-fn resolve_nanobot_command(cfg: &AppConfig) -> NanoBotCommandSpec {
-    let raw = cfg.nanobot_cli_path.to_string_lossy().trim().to_string();
-    if raw.is_empty() {
-        return NanoBotCommandSpec {
-            program: "nanobot".to_string(),
-            args: Vec::new(),
-        };
-    }
-
-    let candidate = FsPathBuf::from(&raw);
-    if candidate.is_dir() {
-        let local_venv = candidate.join(".venv").join("bin").join("nanobot");
-        if local_venv.exists() {
-            return NanoBotCommandSpec {
-                program: local_venv.display().to_string(),
-                args: Vec::new(),
-            };
-        }
-
-        return NanoBotCommandSpec {
-            program: "nanobot".to_string(),
-            args: Vec::new(),
-        };
-    }
-
-    if candidate
-        .extension()
-        .and_then(|value| value.to_str())
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("py"))
-    {
-        if let Some(parent) = candidate.parent() {
-            let local_venv = parent.join(".venv").join("bin").join("nanobot");
-            if local_venv.exists() {
-                return NanoBotCommandSpec {
-                    program: local_venv.display().to_string(),
-                    args: Vec::new(),
-                };
-            }
-        }
-
-        if !candidate.exists() {
-            return NanoBotCommandSpec {
-                program: "nanobot".to_string(),
-                args: Vec::new(),
-            };
-        }
-
-        return NanoBotCommandSpec {
-            program: "python3".to_string(),
-            args: vec![candidate.display().to_string()],
-        };
-    }
-
-    NanoBotCommandSpec {
-        program: raw,
-        args: Vec::new(),
-    }
-}
-
-fn resolve_nanobot_command_cwd(cfg: &AppConfig) -> Option<FsPathBuf> {
-    resolve_nanobot_repo_dir(cfg)
-        .ok()
-        .filter(|path| path.exists() && path.is_dir())
-}
-
-fn run_nanobot_command(
-    spec: &NanoBotCommandSpec,
-    extra_args: &[&str],
-    cwd: Option<&FsPath>,
-) -> io::Result<Output> {
-    let mut command = Command::new(&spec.program);
-    command.args(&spec.args);
-    command.args(extra_args);
-    if let Some(dir) = cwd {
-        command.current_dir(dir);
-    }
-    command.output()
-}
-
-fn decode_command_output(output: &Output) -> String {
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    if !stderr.is_empty() {
-        return stderr;
-    }
-
-    String::from_utf8_lossy(&output.stdout).trim().to_string()
-}
-
-fn decode_stdout(output: &Output) -> String {
-    String::from_utf8_lossy(&output.stdout).trim().to_string()
-}
-
-fn decode_stderr(output: &Output) -> String {
-    String::from_utf8_lossy(&output.stderr).trim().to_string()
-}
-
-fn normalize_nanobot_log_stream(stream: Option<&str>) -> String {
-    let normalized = stream.map(str::trim).unwrap_or("gateway").to_lowercase();
-
-    match normalized.as_str() {
-        "gateway" | "error" | "sync" => normalized,
-        _ => "gateway".to_string(),
-    }
-}
-
-fn nanobot_data_path() -> FsPathBuf {
-    let home = std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .unwrap_or_else(|_| ".".to_string());
-    FsPathBuf::from(home).join(".nanobot")
-}
-
-fn nanobot_log_path_for_stream(stream: &str) -> FsPathBuf {
-    let log_dir = nanobot_data_path().join("logs");
-    match stream {
-        "error" => log_dir.join("gateway.err.log"),
-        "sync" => log_dir.join("agent.log"),
-        _ => log_dir.join("gateway.log"),
-    }
-}
-
-fn read_nanobot_log_chunk(
-    stream: &str,
-    path: &FsPathBuf,
-    cursor: u64,
-    max_bytes: usize,
-) -> Result<NanoBotLogChunkResponse, AppError> {
-    if !path.exists() {
-        return Ok(NanoBotLogChunkResponse {
-            stream: stream.to_string(),
-            path: path.display().to_string(),
-            exists: false,
-            cursor,
-            next_cursor: cursor,
-            file_size: 0,
-            truncated: false,
-            content: String::new(),
-        });
-    }
-
-    let metadata = fs::metadata(path).map_err(|source| {
-        AppError::Provider(ProviderError::Io {
-            context: format!("falha lendo metadata do log {}", path.display()),
-            source,
-        })
-    })?;
-    let file_size = metadata.len();
-
-    let mut effective_cursor = cursor.min(file_size);
-    let truncated = cursor > file_size;
-    if truncated {
-        effective_cursor = 0;
-    }
-
-    let mut file = fs::File::open(path).map_err(|source| {
-        AppError::Provider(ProviderError::Io {
-            context: format!("falha abrindo log {}", path.display()),
-            source,
-        })
-    })?;
-    file.seek(SeekFrom::Start(effective_cursor))
-        .map_err(|source| {
-            AppError::Provider(ProviderError::Io {
-                context: format!("falha posicionando cursor no log {}", path.display()),
-                source,
-            })
-        })?;
-
-    let mut buffer = vec![0_u8; max_bytes];
-    let bytes_read = file.read(&mut buffer).map_err(|source| {
-        AppError::Provider(ProviderError::Io {
-            context: format!("falha lendo log {}", path.display()),
-            source,
-        })
-    })?;
-    buffer.truncate(bytes_read);
-
-    let content = String::from_utf8_lossy(&buffer).to_string();
-    let next_cursor = effective_cursor + bytes_read as u64;
-
-    Ok(NanoBotLogChunkResponse {
-        stream: stream.to_string(),
-        path: path.display().to_string(),
-        exists: true,
-        cursor: effective_cursor,
-        next_cursor,
-        file_size,
-        truncated,
-        content,
-    })
-}
-
-fn refresh_nanobot_process_state(runtime: &mut NanoBotRuntimeManager) {
-    let Some(process) = runtime.process.as_mut() else {
-        return;
-    };
-
-    match process.child.try_wait() {
-        Ok(Some(status)) => {
-            runtime.last_error = Some(format!(
-                "gateway finalizou com status {}",
-                status
-                    .code()
-                    .map(|value| value.to_string())
-                    .unwrap_or_else(|| "desconhecido".to_string())
-            ));
-            runtime.process = None;
-        }
-        Ok(None) => {}
-        Err(error) => {
-            runtime.last_error = Some(format!("falha ao inspecionar processo gateway: {error}"));
-            runtime.process = None;
-        }
-    }
-}
-
-fn build_nanobot_runtime_snapshot(
-    spec: &NanoBotCommandSpec,
-    command_cwd: Option<&FsPath>,
-    runtime: &NanoBotRuntimeManager,
-) -> NanoBotRuntimeStateResponse {
-    let (service_status, service_state, pid, uptime_seconds) =
-        if let Some(process) = runtime.process.as_ref() {
-            (
-                "running".to_string(),
-                "active".to_string(),
-                Some(process.pid as u64),
-                Some(process.started_at.elapsed().as_secs()),
-            )
-        } else {
-            ("stopped".to_string(), "inactive".to_string(), None, None)
-        };
-
-    let mut issues = Vec::new();
-    if let Some(last_error) = runtime.last_error.as_deref() {
-        issues.push(last_error.to_string());
-    }
-
-    if !nanobot_config_path().exists() {
-        issues.push("config.json ausente (execute onboard)".to_string());
-    }
-
-    let status_probe = run_nanobot_command(spec, &["status"], command_cwd);
-    let rpc_ok = status_probe
-        .as_ref()
-        .map(|output| output.status.success())
-        .unwrap_or(false);
-
-    if !rpc_ok {
-        match status_probe {
-            Ok(output) => {
-                let summary = decode_command_output(&output);
-                if !summary.is_empty() {
-                    issues.push(summary.lines().next().unwrap_or_default().to_string());
-                }
-            }
-            Err(error) => {
-                issues.push(format!("status indisponivel: {error}"));
-            }
-        }
-    }
-
-    dedup_vec(&mut issues);
-
-    NanoBotRuntimeStateResponse {
-        service_status,
-        service_state,
-        pid,
-        rpc_ok,
-        port_status: None,
-        issues,
-        uptime_seconds,
-        log_path: nanobot_log_path_for_stream("gateway").display().to_string(),
-    }
-}
-
-async fn stop_nanobot_gateway(runtime: &mut NanoBotRuntimeManager) -> Result<(), AppError> {
-    let Some(mut process) = runtime.process.take() else {
-        return Ok(());
-    };
-
-    process.child.kill().await.map_err(|source| {
-        AppError::Provider(ProviderError::Io {
-            context: "Falha ao finalizar processo gateway do NanoBot".to_string(),
-            source,
-        })
-    })?;
-    let _ = process.child.wait().await;
-    Ok(())
-}
-
-async fn spawn_nanobot_gateway(
-    spec: &NanoBotCommandSpec,
-    command_cwd: Option<&FsPath>,
-    runtime: &mut NanoBotRuntimeManager,
-) -> Result<(), AppError> {
-    let log_dir = nanobot_data_path().join("logs");
-    fs::create_dir_all(&log_dir).map_err(|source| {
-        AppError::Provider(ProviderError::Io {
-            context: format!(
-                "Falha ao criar diretorio de logs do NanoBot ({})",
-                log_dir.display()
-            ),
-            source,
-        })
-    })?;
-
-    let gateway_log = nanobot_log_path_for_stream("gateway");
-    let gateway_err_log = nanobot_log_path_for_stream("error");
-
-    let stdout_file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&gateway_log)
-        .map_err(|source| {
-            AppError::Provider(ProviderError::Io {
-                context: format!("Falha ao abrir log {}", gateway_log.display()),
-                source,
-            })
-        })?;
-    let stderr_file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&gateway_err_log)
-        .map_err(|source| {
-            AppError::Provider(ProviderError::Io {
-                context: format!("Falha ao abrir log {}", gateway_err_log.display()),
-                source,
-            })
-        })?;
-
-    let mut command = TokioCommand::new(&spec.program);
-    command.args(&spec.args);
-    command.arg("gateway");
-    if let Some(cwd) = command_cwd {
-        command.current_dir(cwd);
-    }
-    command.stdin(Stdio::null());
-    command.stdout(Stdio::from(stdout_file));
-    command.stderr(Stdio::from(stderr_file));
-
-    let mut child = command.spawn().map_err(|source| {
-        AppError::Provider(ProviderError::Io {
-            context: format!(
-                "Falha ao iniciar gateway do NanoBot via '{} gateway'",
-                spec.display()
-            ),
-            source,
-        })
-    })?;
-
-    tokio::time::sleep(std::time::Duration::from_millis(350)).await;
-    if let Some(status) = child.try_wait().map_err(|source| {
-        AppError::Provider(ProviderError::Io {
-            context: "Falha ao checar processo inicial do NanoBot".to_string(),
-            source,
-        })
-    })? {
-        let tail =
-            read_log_tail(&gateway_err_log, 4096).or_else(|| read_log_tail(&gateway_log, 4096));
-        let details =
-            tail.unwrap_or_else(|| "processo encerrou imediatamente sem detalhes".to_string());
-        return Err(AppError::Provider(ProviderError::Unavailable {
-            details: format!(
-                "gateway do NanoBot encerrou logo apos start (status {status}): {details}"
-            ),
-        }));
-    }
-
-    let pid = child.id().unwrap_or(0);
-    runtime.process = Some(NanoBotProcessHandle {
-        child,
-        pid,
-        started_at: Instant::now(),
-    });
-    runtime.last_error = None;
-    Ok(())
-}
-
-fn read_log_tail(path: &FsPath, max_bytes: usize) -> Option<String> {
-    if !path.exists() {
-        return None;
-    }
-
-    let mut file = fs::File::open(path).ok()?;
-    let file_size = file.metadata().ok()?.len();
-    let start = file_size.saturating_sub(max_bytes as u64);
-    if file.seek(SeekFrom::Start(start)).is_err() {
-        return None;
-    }
-
-    let mut bytes = Vec::new();
-    if file.read_to_end(&mut bytes).is_err() {
-        return None;
-    }
-
-    let text = String::from_utf8_lossy(&bytes).trim().to_string();
-    if text.is_empty() {
-        None
-    } else {
-        Some(text)
-    }
-}
-
-fn default_nanobot_config() -> Value {
-    json!({
-        "agents": {
-            "defaults": {
-                "workspace": nanobot_workspace_path().display().to_string(),
-                "model": "anthropic/claude-opus-4-5"
-            }
-        }
-    })
-}
-
-const OPENCLAW_ENV_CATALOG: &[(&str, &str)] = &[
+const ENVIRONMENT_CATALOG: &[(&str, &str)] = &[
     ("OPENROUTER_API_KEY", "OpenRouter API key"),
     ("DEEPSEEK_API_KEY", "DeepSeek API key"),
     ("DEEPSEEK_BASE_URL", "DeepSeek base URL"),
@@ -3749,22 +2175,21 @@ const OPENCLAW_ENV_CATALOG: &[(&str, &str)] = &[
     ("TELEGRAM_BOT_TOKEN", "Telegram bot token"),
     ("TELEGRAM_CHAT_ID", "Telegram chat id"),
     ("DISCORD_BOT_TOKEN", "Discord bot token"),
-    ("OPENCLAW_GATEWAY_TOKEN", "OpenClaw gateway token"),
 ];
 
-fn build_openclaw_environment_response(
+fn build_environment_response(
     reveal: bool,
-) -> Result<OpenClawEnvironmentResponse, AppError> {
+) -> Result<EnvironmentResponse, AppError> {
     let cfg = AppConfig::load_settings().apply_env();
-    let env_path = resolve_openclaw_env_path(&cfg);
-    let env_example_path = resolve_openclaw_env_example_path(&env_path);
+    let env_path = resolve_environment_path(&cfg);
+    let env_example_path = resolve_environment_example_path(&env_path);
 
     let env_values = read_env_file_assignments_optional(&env_path)?;
     let env_example_values = read_env_file_assignments_optional(&env_example_path)?;
 
     let mut labels = BTreeMap::new();
     let mut keys = BTreeSet::new();
-    for (key, label) in OPENCLAW_ENV_CATALOG {
+    for (key, label) in ENVIRONMENT_CATALOG {
         labels.insert((*key).to_string(), (*label).to_string());
         keys.insert((*key).to_string());
     }
@@ -3798,7 +2223,7 @@ fn build_openclaw_environment_response(
             "catalog"
         };
 
-        variables.push(OpenClawEnvironmentVariable {
+        variables.push(EnvironmentVariableView {
             label: labels
                 .get(&key)
                 .cloned()
@@ -3816,7 +2241,7 @@ fn build_openclaw_environment_response(
         });
     }
 
-    Ok(OpenClawEnvironmentResponse {
+    Ok(EnvironmentResponse {
         env_path: env_path.display().to_string(),
         env_exists: env_path.exists(),
         env_example_path: env_example_path.display().to_string(),
@@ -3825,12 +2250,13 @@ fn build_openclaw_environment_response(
     })
 }
 
-fn update_openclaw_environment_file(updates: BTreeMap<String, String>) -> Result<(), AppError> {
+fn update_environment_file(updates: BTreeMap<String, String>) -> Result<(), AppError> {
     let mut normalized_updates = BTreeMap::new();
     for (raw_key, raw_value) in updates {
-        let Some(key) = normalize_env_key(&raw_key) else {
+        let key = normalize_env_key(&raw_key);
+        if key.is_empty() {
             continue;
-        };
+        }
         normalized_updates.insert(key, raw_value.trim().to_string());
     }
 
@@ -3841,13 +2267,13 @@ fn update_openclaw_environment_file(updates: BTreeMap<String, String>) -> Result
     }
 
     let cfg = AppConfig::load_settings().apply_env();
-    let env_path = resolve_openclaw_env_path(&cfg);
+    let env_path = resolve_environment_path(&cfg);
 
     let mut lines = if env_path.exists() {
         fs::read_to_string(&env_path)
             .map_err(|source| {
                 AppError::Provider(ProviderError::Io {
-                    context: format!("Falha ao ler environment OpenClaw ({})", env_path.display()),
+                    context: format!("Falha ao ler arquivo de environment ({})", env_path.display()),
                     source,
                 })
             })?
@@ -3878,7 +2304,7 @@ fn update_openclaw_environment_file(updates: BTreeMap<String, String>) -> Result
         fs::create_dir_all(parent).map_err(|source| {
             AppError::Provider(ProviderError::Io {
                 context: format!(
-                    "Falha ao criar diretorio do environment OpenClaw ({})",
+                    "Falha ao criar diretorio do environment ({})",
                     parent.display()
                 ),
                 source,
@@ -3893,7 +2319,7 @@ fn update_openclaw_environment_file(updates: BTreeMap<String, String>) -> Result
     fs::write(&env_path, next_content).map_err(|source| {
         AppError::Provider(ProviderError::Io {
             context: format!(
-                "Falha ao salvar environment OpenClaw ({})",
+                "Falha ao salvar arquivo de environment ({})",
                 env_path.display()
             ),
             source,
@@ -3903,228 +2329,64 @@ fn update_openclaw_environment_file(updates: BTreeMap<String, String>) -> Result
     Ok(())
 }
 
-fn sync_nanobot_cloud_provider_from_environment(
-    config: &mut Value,
-    model_reference: &str,
-) -> Result<bool, AppError> {
-    let Some(provider) = infer_model_provider_name(model_reference) else {
-        return Ok(false);
-    };
-
-    let (provider_key, api_key_candidates, base_url_candidates) =
-        nanobot_provider_env_binding(&provider);
-    if api_key_candidates.is_empty() {
-        return Ok(false);
-    }
-
-    let openclaw_env_values = read_openclaw_environment_values()?;
-    let Some(api_key) = api_key_candidates
-        .iter()
-        .find_map(|key| resolve_environment_value(&openclaw_env_values, key))
-    else {
-        return Ok(false);
-    };
-
-    let mut changed = false;
-    let api_key_pointer = format!("/providers/{provider_key}/apiKey");
-    let current_api_key = config
-        .pointer(&api_key_pointer)
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .unwrap_or_default();
-    if current_api_key != api_key {
-        set_json_string_at_path(
-            config,
-            &["providers", provider_key.as_str(), "apiKey"],
-            api_key.clone(),
-        );
-        changed = true;
-    }
-
-    if let Some(base_url) = base_url_candidates
-        .iter()
-        .find_map(|key| resolve_environment_value(&openclaw_env_values, key))
-    {
-        let base_url_pointer = format!("/providers/{provider_key}/apiBase");
-        let current_base_url = config
-            .pointer(&base_url_pointer)
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .unwrap_or_default();
-        if current_base_url != base_url {
-            set_json_string_at_path(
-                config,
-                &["providers", provider_key.as_str(), "apiBase"],
-                base_url,
-            );
-            changed = true;
-        }
-    }
-
-    Ok(changed)
+fn read_environment_values() -> Result<BTreeMap<String, String>, AppError> {
+    let cfg = AppConfig::load_settings().apply_env();
+    let env_path = resolve_environment_path(&cfg);
+    read_env_file_assignments_optional(&env_path)
 }
 
-fn sync_nanobot_model_provider_from_environment() -> Result<(), AppError> {
-    let Some(mut config) = read_nanobot_config_json_optional()? else {
-        return Ok(());
-    };
-
-    let current = build_nanobot_model_response(Some(&config));
-    if current.source != "cloud" {
-        return Ok(());
+fn resolve_environment_value(values: &BTreeMap<String, String>, key: &str) -> Option<String> {
+    let key = normalize_env_key(key);
+    if key.is_empty() {
+        return None;
     }
-
-    if sync_nanobot_cloud_provider_from_environment(&mut config, &current.reference)? {
-        write_nanobot_config_json(&config)?;
-    }
-
-    Ok(())
+    values
+        .get(&key)
+        .cloned()
+        .or_else(|| {
+            std::env::var(&key)
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        })
 }
 
-fn infer_model_provider_name(model_reference: &str) -> Option<String> {
-    let provider = model_reference
-        .split('/')
-        .next()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())?
-        .to_lowercase();
-
-    let normalized = match provider.as_str() {
-        "zai" | "zhipuai" => "zhipu".to_string(),
-        "kimi" => "moonshot".to_string(),
-        other => other.to_string(),
-    };
-    Some(normalized)
+fn resolve_environment_path(cfg: &AppConfig) -> FsPathBuf {
+    AppConfig::get_settings_path()
+        .parent()
+        .map(|parent| parent.join(".env"))
+        .unwrap_or_else(|| default_app_environment_dir(cfg).join(".env"))
 }
 
-fn nanobot_provider_env_binding(provider: &str) -> (String, Vec<String>, Vec<String>) {
-    match provider {
-        "openrouter" => (
-            "openrouter".to_string(),
-            vec!["OPENROUTER_API_KEY".to_string()],
-            vec!["OPENROUTER_BASE_URL".to_string()],
-        ),
-        "deepseek" => (
-            "deepseek".to_string(),
-            vec!["DEEPSEEK_API_KEY".to_string()],
-            vec!["DEEPSEEK_BASE_URL".to_string()],
-        ),
-        "openai" | "aihubmix" | "siliconflow" | "volcengine" => (
-            "openai".to_string(),
-            vec!["OPENAI_API_KEY".to_string()],
-            vec!["OPENAI_BASE_URL".to_string()],
-        ),
-        "anthropic" => (
-            "anthropic".to_string(),
-            vec!["ANTHROPIC_API_KEY".to_string()],
-            Vec::new(),
-        ),
-        "gemini" => (
-            "gemini".to_string(),
-            vec!["GEMINI_API_KEY".to_string(), "GOOGLE_API_KEY".to_string()],
-            vec!["GEMINI_BASE_URL".to_string()],
-        ),
-        "groq" => (
-            "groq".to_string(),
-            vec!["GROQ_API_KEY".to_string()],
-            vec!["GROQ_BASE_URL".to_string()],
-        ),
-        "dashscope" => (
-            "dashscope".to_string(),
-            vec!["DASHSCOPE_API_KEY".to_string()],
-            Vec::new(),
-        ),
-        "moonshot" => (
-            "moonshot".to_string(),
-            vec!["MOONSHOT_API_KEY".to_string(), "KIMI_API_KEY".to_string()],
-            vec!["MOONSHOT_API_BASE".to_string()],
-        ),
-        "minimax" => (
-            "minimax".to_string(),
-            vec!["MINIMAX_API_KEY".to_string()],
-            vec!["MINIMAX_BASE_URL".to_string()],
-        ),
-        "zhipu" => (
-            "zhipu".to_string(),
-            vec!["ZAI_API_KEY".to_string(), "ZHIPUAI_API_KEY".to_string()],
-            Vec::new(),
-        ),
-        "vllm" | "hosted_vllm" => (
-            "vllm".to_string(),
-            vec![
-                "HOSTED_VLLM_API_KEY".to_string(),
-                "OPENAI_API_KEY".to_string(),
-            ],
-            vec!["OPENAI_BASE_URL".to_string()],
-        ),
-        other => (
-            other.to_string(),
-            vec![format!(
-                "{}_API_KEY",
-                other.to_ascii_uppercase().replace('-', "_")
-            )],
-            vec![format!(
-                "{}_BASE_URL",
-                other.to_ascii_uppercase().replace('-', "_")
-            )],
-        ),
-    }
-}
-
-fn resolve_openclaw_env_path(cfg: &AppConfig) -> FsPathBuf {
-    let mut candidates = Vec::new();
-    if let Some(parent) = cfg.openclaw_state_dir.parent() {
-        candidates.push(parent.join(".env"));
-    }
-    candidates.push(cfg.openclaw_state_dir.join(".env"));
-    if let Some(parent) = cfg.openclaw_cli_path.parent() {
-        candidates.push(parent.join("deploy").join(".env"));
-        candidates.push(parent.join(".env"));
-    }
-
-    let mut seen = BTreeSet::new();
-    for candidate in candidates {
-        if seen.insert(candidate.clone()) && candidate.exists() {
-            return candidate;
-        }
-    }
-
-    if let Some(first) = seen.into_iter().next() {
-        first
-    } else {
-        FsPathBuf::from(".env")
-    }
-}
-
-fn resolve_openclaw_env_example_path(env_path: &FsPath) -> FsPathBuf {
+fn resolve_environment_example_path(env_path: &FsPath) -> FsPathBuf {
     env_path
         .parent()
         .map(|parent| parent.join(".env.example"))
         .unwrap_or_else(|| FsPathBuf::from(".env.example"))
 }
 
-fn read_openclaw_environment_values() -> Result<BTreeMap<String, String>, AppError> {
-    let cfg = AppConfig::load_settings().apply_env();
-    let env_path = resolve_openclaw_env_path(&cfg);
-    read_env_file_assignments_optional(&env_path)
+fn default_app_environment_dir(cfg: &AppConfig) -> FsPathBuf {
+    AppConfig::get_settings_path()
+        .parent()
+        .map(FsPathBuf::from)
+        .or_else(|| cfg.models_dir.parent().map(FsPathBuf::from))
+        .unwrap_or_else(|| FsPathBuf::from("."))
 }
 
 fn read_env_file_assignments_optional(path: &FsPath) -> Result<BTreeMap<String, String>, AppError> {
     if !path.exists() {
         return Ok(BTreeMap::new());
     }
-    read_env_file_assignments(path)
-}
 
-fn read_env_file_assignments(path: &FsPath) -> Result<BTreeMap<String, String>, AppError> {
-    let content = fs::read_to_string(path).map_err(|source| {
+    let body = fs::read_to_string(path).map_err(|source| {
         AppError::Provider(ProviderError::Io {
             context: format!("Falha ao ler arquivo de environment ({})", path.display()),
             source,
         })
     })?;
+
     let mut values = BTreeMap::new();
-    for line in content.lines() {
+    for line in body.lines() {
         if let Some((key, value)) = parse_env_assignment_line(line) {
             values.insert(key, value);
         }
@@ -4138,50 +2400,41 @@ fn parse_env_assignment_line(line: &str) -> Option<(String, String)> {
         return None;
     }
 
-    let without_export = trimmed.strip_prefix("export ").unwrap_or(trimmed);
-    let (raw_key, raw_value) = without_export.split_once('=')?;
-    let key = normalize_env_key(raw_key)?;
+    let (raw_key, raw_value) = trimmed.split_once('=')?;
+    let key = normalize_env_key(raw_key);
+    if key.is_empty() {
+        return None;
+    }
     let value = decode_env_value(raw_value.trim());
     Some((key, value))
 }
 
-fn normalize_env_key(raw: &str) -> Option<String> {
-    let key = raw.trim().to_uppercase();
-    if key.is_empty() || !is_valid_env_key(&key) {
-        return None;
-    }
-    Some(key)
-}
-
-fn is_valid_env_key(key: &str) -> bool {
-    key.chars()
-        .all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit() || ch == '_')
-}
-
 fn decode_env_value(raw: &str) -> String {
     let trimmed = raw.trim();
-    if trimmed.len() >= 2
-        && ((trimmed.starts_with('"') && trimmed.ends_with('"'))
-            || (trimmed.starts_with('\'') && trimmed.ends_with('\'')))
-    {
-        let inner = &trimmed[1..trimmed.len() - 1];
-        if trimmed.starts_with('"') {
-            return inner.replace("\\\"", "\"").replace("\\\\", "\\");
+    if trimmed.len() >= 2 {
+        let quoted = (trimmed.starts_with('"') && trimmed.ends_with('"'))
+            || (trimmed.starts_with('\'') && trimmed.ends_with('\''));
+        if quoted {
+            let inner = &trimmed[1..trimmed.len() - 1];
+            return inner
+                .replace("\\n", "\n")
+                .replace("\\r", "\r")
+                .replace("\\t", "\t")
+                .replace("\\\"", "\"")
+                .replace("\\\\", "\\");
         }
-        return inner.to_string();
     }
-
     trimmed.to_string()
 }
 
 fn encode_env_value(value: &str) -> String {
     if value.is_empty() {
-        return String::new();
+        return "\"\"".to_string();
     }
 
-    let requires_quotes = value
-        .chars()
-        .any(|ch| ch.is_whitespace() || matches!(ch, '#' | '"' | '\''));
+    let requires_quotes = value.chars().any(|ch| {
+        ch.is_whitespace() || matches!(ch, '#' | '"' | '\'' | '\\')
+    });
     if !requires_quotes {
         return value.to_string();
     }
@@ -4190,486 +2443,43 @@ fn encode_env_value(value: &str) -> String {
 }
 
 fn should_expose_environment_key(key: &str) -> bool {
-    let normalized = key.trim().to_uppercase();
+    let normalized = normalize_env_key(key);
     if normalized.is_empty() {
         return false;
     }
-    normalized.ends_with("_API_KEY")
-        || normalized.ends_with("_TOKEN")
-        || normalized.ends_with("_SECRET")
-        || normalized.ends_with("_BASE_URL")
-        || normalized == "TELEGRAM_CHAT_ID"
+    normalized.contains('_')
+        && normalized
+            .chars()
+            .all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit() || ch == '_')
 }
 
 fn is_secret_environment_key(key: &str) -> bool {
-    let normalized = key.trim().to_uppercase();
-    normalized.contains("KEY")
-        || normalized.contains("TOKEN")
-        || normalized.contains("SECRET")
-        || normalized.contains("PASSWORD")
+    let upper = key.trim().to_ascii_uppercase();
+    upper.contains("KEY")
+        || upper.contains("TOKEN")
+        || upper.contains("SECRET")
+        || upper.contains("PASSWORD")
 }
 
 fn mask_environment_value(value: &str) -> String {
-    if value.trim().is_empty() {
-        return "-".to_string();
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    if trimmed.len() <= 8 {
+        return "*".repeat(trimmed.len());
     }
 
-    let visible_prefix = value.chars().take(4).collect::<String>();
-    let visible_suffix = value
+    let prefix = trimmed.chars().take(4).collect::<String>();
+    let suffix = trimmed
         .chars()
         .rev()
-        .take(3)
+        .take(2)
         .collect::<Vec<_>>()
         .into_iter()
         .rev()
         .collect::<String>();
-    let hidden_count = value
-        .chars()
-        .count()
-        .saturating_sub(visible_prefix.len() + visible_suffix.len());
-    if hidden_count == 0 {
-        return value.to_string();
-    }
-    format!(
-        "{visible_prefix}{}{}",
-        "*".repeat(hidden_count),
-        visible_suffix
-    )
+    let hidden = "*".repeat(trimmed.chars().count().saturating_sub(6));
+    format!("{prefix}{hidden}{suffix}")
 }
 
-fn resolve_environment_value(values: &BTreeMap<String, String>, key: &str) -> Option<String> {
-    let normalized = normalize_env_key(key)?;
-    if let Some(value) = values
-        .get(&normalized)
-        .map(String::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        return Some(value.to_string());
-    }
-
-    std::env::var(&normalized)
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-}
-
-fn read_nanobot_config_json_optional() -> Result<Option<Value>, AppError> {
-    let path = nanobot_config_path();
-    if !path.exists() {
-        return Ok(None);
-    }
-
-    let raw = fs::read_to_string(&path).map_err(|source| {
-        AppError::Provider(ProviderError::Io {
-            context: format!("Falha ao ler config NanoBot ({})", path.display()),
-            source,
-        })
-    })?;
-
-    serde_json::from_str::<Value>(&raw)
-        .map(Some)
-        .map_err(|source| {
-            AppError::Provider(ProviderError::Io {
-                context: format!("Falha ao parsear config NanoBot ({})", path.display()),
-                source: io::Error::other(source.to_string()),
-            })
-        })
-}
-
-fn write_nanobot_config_json(config: &Value) -> Result<(), AppError> {
-    let path = nanobot_config_path();
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|source| {
-            AppError::Provider(ProviderError::Io {
-                context: format!(
-                    "Falha ao criar diretorio de config NanoBot ({})",
-                    parent.display()
-                ),
-                source,
-            })
-        })?;
-    }
-
-    let body = serde_json::to_string_pretty(config).map_err(|source| {
-        AppError::Provider(ProviderError::Io {
-            context: "Falha ao serializar config NanoBot".to_string(),
-            source: io::Error::other(source.to_string()),
-        })
-    })?;
-
-    fs::write(&path, body).map_err(|source| {
-        AppError::Provider(ProviderError::Io {
-            context: format!("Falha ao salvar config NanoBot ({})", path.display()),
-            source,
-        })
-    })?;
-
-    Ok(())
-}
-
-fn set_json_string_at_path(root: &mut Value, path: &[&str], value: String) {
-    if path.is_empty() {
-        return;
-    }
-
-    let mut cursor = root;
-    for (index, key) in path.iter().enumerate() {
-        let is_last = index + 1 == path.len();
-        if !cursor.is_object() {
-            *cursor = Value::Object(serde_json::Map::new());
-        }
-
-        let object = cursor.as_object_mut().expect("cursor must be object");
-        if is_last {
-            object.insert((*key).to_string(), Value::String(value.clone()));
-            return;
-        }
-
-        cursor = object
-            .entry((*key).to_string())
-            .or_insert_with(|| Value::Object(serde_json::Map::new()));
-    }
-}
-
-fn remove_json_key_at_path(root: &mut Value, path: &[&str]) {
-    if path.is_empty() {
-        return;
-    }
-
-    let mut cursor = root;
-    for key in &path[..path.len().saturating_sub(1)] {
-        let Some(next) = cursor.get_mut(*key) else {
-            return;
-        };
-        cursor = next;
-    }
-
-    if let Some(object) = cursor.as_object_mut() {
-        object.remove(path[path.len() - 1]);
-    }
-}
-
-fn extract_nanobot_model_value(config: &Value) -> Option<String> {
-    config
-        .pointer("/agents/defaults/model")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToString::to_string)
-}
-
-fn extract_nanobot_model_source_value(config: &Value) -> Option<String> {
-    config
-        .pointer("/agents/defaults/model_source")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_lowercase)
-}
-
-fn extract_nanobot_model_reference_value(config: &Value) -> Option<String> {
-    config
-        .pointer("/agents/defaults/model_reference")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToString::to_string)
-}
-
-fn extract_nanobot_model_local_name_value(config: &Value) -> Option<String> {
-    config
-        .pointer("/agents/defaults/model_local_name")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToString::to_string)
-}
-
-fn extract_nanobot_model_local_path_value(config: &Value) -> Option<String> {
-    config
-        .pointer("/agents/defaults/model_local_path")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToString::to_string)
-}
-
-fn extract_nanobot_workspace_value(config: &Value) -> Option<FsPathBuf> {
-    config
-        .pointer("/agents/defaults/workspace")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(|value| {
-            if let Some(rest) = value.strip_prefix("~/") {
-                return nanobot_home_dir().join(rest);
-            }
-            FsPathBuf::from(value)
-        })
-}
-
-fn resolve_nanobot_workspace_from_config() -> Option<FsPathBuf> {
-    read_nanobot_config_json_optional()
-        .ok()
-        .flatten()
-        .and_then(|config| extract_nanobot_workspace_value(&config))
-}
-
-fn build_nanobot_model_response(config: Option<&Value>) -> OpenClawCurrentModel {
-    let model = config
-        .and_then(extract_nanobot_model_value)
-        .unwrap_or_default();
-    let source = config
-        .and_then(extract_nanobot_model_source_value)
-        .filter(|value| matches!(value.as_str(), "cloud" | "local"))
-        .unwrap_or_else(|| "cloud".to_string());
-    let reference = config
-        .and_then(extract_nanobot_model_reference_value)
-        .unwrap_or_else(|| model.clone());
-    let provider = reference
-        .split('/')
-        .next()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or("-")
-        .to_string();
-    let label = if source == "local" {
-        config
-            .and_then(extract_nanobot_model_local_name_value)
-            .map(|name| format!("{name} (local)"))
-            .unwrap_or_else(|| {
-                if reference.is_empty() {
-                    "-".to_string()
-                } else {
-                    format!("{reference} (local)")
-                }
-            })
-    } else if reference.is_empty() && model.is_empty() {
-        "-".to_string()
-    } else if reference.is_empty() {
-        model.clone()
-    } else {
-        reference.clone()
-    };
-
-    OpenClawCurrentModel {
-        source,
-        reference,
-        model,
-        provider,
-        label,
-    }
-}
-
-fn shared_agent_default_cloud_models() -> Vec<OpenClawCloudModel> {
-    vec![
-        OpenClawCloudModel {
-            reference: "deepseek/deepseek-chat".to_string(),
-            provider: "deepseek".to_string(),
-            model: "deepseek-chat".to_string(),
-            label: "DeepSeek Chat".to_string(),
-            alias: None,
-        },
-        OpenClawCloudModel {
-            reference: "deepseek/deepseek-reasoner".to_string(),
-            provider: "deepseek".to_string(),
-            model: "deepseek-reasoner".to_string(),
-            label: "DeepSeek Reasoner".to_string(),
-            alias: None,
-        },
-    ]
-}
-
-fn build_nanobot_observability_snapshot() -> Result<NanoBotObservabilityResponse, AppError> {
-    let config = read_nanobot_config_json_optional()?;
-    let model = config.as_ref().and_then(extract_nanobot_model_value);
-    let provider = model.as_deref().and_then(|value| {
-        value
-            .split('/')
-            .next()
-            .map(str::trim)
-            .filter(|segment| !segment.is_empty())
-            .map(ToString::to_string)
-    });
-    let workspace = config
-        .as_ref()
-        .and_then(extract_nanobot_workspace_value)
-        .unwrap_or_else(nanobot_workspace_path);
-    let skills = list_nanobot_skills(&workspace);
-    let tools = list_nanobot_tools(config.as_ref());
-
-    Ok(NanoBotObservabilityResponse {
-        session_key: "nanobot:main".to_string(),
-        provider,
-        model,
-        usage: None,
-        skills,
-        tools,
-        updated_at: now_unix_ms(),
-    })
-}
-
-fn list_nanobot_skills(workspace: &FsPath) -> Vec<String> {
-    let mut skills = Vec::new();
-    let skills_dir = workspace.join("skills");
-    let entries = match fs::read_dir(&skills_dir) {
-        Ok(entries) => entries,
-        Err(_) => return skills,
-    };
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let name = if path.is_dir() {
-            path.file_name()
-                .and_then(|value| value.to_str())
-                .map(str::to_string)
-        } else {
-            path.file_stem()
-                .and_then(|value| value.to_str())
-                .map(str::to_string)
-        };
-
-        if let Some(name) = name {
-            let normalized = name.trim();
-            if !normalized.is_empty() {
-                skills.push(normalized.to_string());
-            }
-        }
-    }
-
-    skills.sort();
-    skills.dedup();
-    skills
-}
-
-fn list_nanobot_tools(config: Option<&Value>) -> Vec<String> {
-    let mut tools = vec![
-        "exec".to_string(),
-        "files".to_string(),
-        "memory".to_string(),
-    ];
-
-    if let Some(config) = config {
-        if let Some(web) = config
-            .pointer("/tools/web/search")
-            .and_then(Value::as_object)
-        {
-            let has_api_key = web
-                .get("apiKey")
-                .or_else(|| web.get("api_key"))
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .is_some_and(|value| !value.is_empty());
-            if has_api_key {
-                tools.push("web.search".to_string());
-            }
-        }
-
-        let mcp_servers = config
-            .pointer("/tools/mcpServers")
-            .and_then(Value::as_object)
-            .or_else(|| {
-                config
-                    .pointer("/tools/mcp_servers")
-                    .and_then(Value::as_object)
-            });
-        if let Some(mcp_servers) = mcp_servers {
-            for server_name in mcp_servers.keys() {
-                let trimmed = server_name.trim();
-                if !trimmed.is_empty() {
-                    tools.push(format!("mcp:{trimmed}"));
-                }
-            }
-        }
-
-        let restricted = config
-            .pointer("/tools/restrictToWorkspace")
-            .and_then(Value::as_bool)
-            .or_else(|| {
-                config
-                    .pointer("/tools/restrict_to_workspace")
-                    .and_then(Value::as_bool)
-            })
-            .unwrap_or(false);
-        if restricted {
-            tools.push("workspace.restricted".to_string());
-        }
-    }
-
-    tools.sort();
-    tools.dedup();
-    tools
-}
-
-fn extract_nanobot_reply(stdout: &str, stderr: &str) -> String {
-    let stdout_reply = sanitize_nanobot_cli_text(stdout);
-    if !stdout_reply.is_empty() {
-        return stdout_reply;
-    }
-
-    sanitize_nanobot_cli_text(stderr)
-}
-
-fn sanitize_nanobot_cli_text(raw: &str) -> String {
-    let lines = raw
-        .replace('\r', "")
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .filter(|line| !line.starts_with('✓'))
-        .filter(|line| !line.starts_with("You:"))
-        .filter(|line| !line.starts_with("Goodbye"))
-        .filter(|line| !line.contains("nanobot is thinking"))
-        .filter(|line| !line.contains("Interactive mode"))
-        .filter(|line| !line.chars().all(|ch| ch == '='))
-        .filter(|line| !is_nanobot_telemetry_line(line))
-        .map(ToString::to_string)
-        .collect::<Vec<_>>();
-
-    lines.join("\n").trim().to_string()
-}
-
-fn is_nanobot_telemetry_line(line: &str) -> bool {
-    let normalized = line.trim().to_lowercase();
-    normalized.starts_with("prompt:")
-        || normalized.starts_with("generation:")
-        || normalized.starts_with("peak memory:")
-        || normalized.starts_with("completed •")
-        || normalized.ends_with("ms")
-            && (normalized.contains("session ") || normalized.contains("local shared model"))
-        || normalized.contains("tokens-per-sec")
-}
-
-fn dedup_vec(values: &mut Vec<String>) {
-    values.retain(|value| !value.trim().is_empty());
-    let mut deduped = Vec::new();
-    for value in values.iter() {
-        if !deduped.iter().any(|entry: &String| entry == value) {
-            deduped.push(value.clone());
-        }
-    }
-    *values = deduped;
-}
-
-fn now_unix_ms() -> Option<u64> {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .ok()
-        .map(|duration| duration.as_millis() as u64)
-}
-
-fn nanobot_home_dir() -> FsPathBuf {
-    let home = std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .unwrap_or_else(|_| ".".to_string());
-    FsPathBuf::from(home)
-}
-
-fn nanobot_config_path() -> FsPathBuf {
-    nanobot_data_path().join("config.json")
-}
-
-fn nanobot_workspace_path() -> FsPathBuf {
-    nanobot_data_path().join("workspace")
-}

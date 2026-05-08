@@ -178,12 +178,45 @@ Configuracao e persistida localmente e aplicada no backend a cada run.
 ## 10. Session Management
 
 Para manter um historico rico e local da atividade do agente:
-- **SessionStore**: persiste as mensagens em arquivos JSONL no diretorio base do sistema.
+- **SessionStore**: persiste sessoes e eventos estruturados em SQLite local (`settings/agent/state.sqlite`), com import de legado JSONL quando necessario.
 - Gerenciamento via UI: endpoints `GET/POST/PATCH/DELETE /agent/sessions` gerenciam as sessoes ativas.
-- As mensagens (`User`, `ToolCall` e `Assistant`) originadas de chamadas `/agent/run` sao automaticamente anexadas a sessao fornecida (`session_id`).
+- As mensagens, tool calls, tool results e snapshots relevantes originados de chamadas `/agent/run` podem ser anexados a sessao fornecida (`session_id`).
 - Opcao nativa de exportacao via `GET /agent/sessions/:id/export` para revisar as traces completas em JSON normalizado.
 
-## 11. Limites atuais (preview)
+## 11. Hermes-Inspired Runtime
+
+O backend agora suporta dois modos:
+
+- `classic`: caminho legado, mantendo o `AgentLoop` atual.
+- `hermes_inspired`: runtime opt-in com:
+  - hidratacao de memoria local antes do turno
+  - snapshots e resumos persistidos por sessao
+  - busca em sessoes anteriores (`session_search`)
+  - persistencia estruturada de `tool_call` / `tool_result`
+  - escrita explicita de memoria duravel (`memory_write`)
+  - delegacao sincronizada de sessao filha (`delegate_session`)
+  - toolsets nomeados para restringir o subconjunto de tools por request
+  - provider profiles para separar configuracao global de provider/modelo da selecao por sessao
+  - contexto local de gateway (`source_channel`, `thread_id`, `sender_id`, `correlation_id`)
+
+Configuracao:
+
+- `agent.runtime_variant`
+- `agent.persist_tool_events`
+- `agent.memory_profile`
+- `agent.memory_snapshot_mode`
+- `agent.session_search_enabled`
+- `agent.default_toolset_id`
+- `agent.provider_profile_id`
+- `agent.provider_profiles`
+- `agent.gateway_mode`
+
+Endpoints operacionais novos:
+
+- `GET /agent/toolsets`
+- `GET /agent/provider-profiles`
+
+## 12. Limites atuais (preview)
 
 - `POST /agent/stream` ainda em modo stub para stream full de eventos.
 - coverage de ferramentas e policy deve continuar evoluindo para cenario production-grade.

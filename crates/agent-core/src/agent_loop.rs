@@ -445,6 +445,7 @@ impl AgentLoop {
                 self.event_bus.emit(AgentEvent::ToolCallStarted {
                     session_id: session_id.clone(),
                     tool: tool_call.name.clone(),
+                    call_id: tool_call.id.clone(),
                     params: serde_json::from_str(&tool_call.arguments).unwrap_or_default(),
                 });
                 self.event_bus.emit(AgentEvent::ThinkingDelta {
@@ -459,6 +460,8 @@ impl AgentLoop {
                         self.event_bus.emit(AgentEvent::ToolCallCompleted {
                             session_id: session_id.clone(),
                             tool: tool_call.name.clone(),
+                            call_id: tool_call.id.clone(),
+                            result: output.clone(),
                             result_preview: output.chars().take(240).collect(),
                         });
                         output

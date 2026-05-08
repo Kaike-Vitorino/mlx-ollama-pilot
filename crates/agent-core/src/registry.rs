@@ -116,6 +116,13 @@ impl ToolRegistry {
             .collect()
     }
 
+    pub fn retain<F>(&mut self, mut keep: F)
+    where
+        F: FnMut(&str) -> bool,
+    {
+        self.tools.retain(|name, _| keep(name));
+    }
+
     /// Number of registered tools.
     pub fn len(&self) -> usize {
         self.tools.len()
@@ -262,7 +269,7 @@ impl PluginRegistry {
         self.plugins.values().cloned().collect()
     }
 
-    pub fn openclaw_compat() -> Self {
+    pub fn compatibility_catalog() -> Self {
         let mut registry = Self::new();
         for plugin in compat_plugins() {
             registry.register(plugin);
@@ -319,7 +326,7 @@ impl ChannelRegistry {
         self.channels.values().cloned().collect()
     }
 
-    pub fn openclaw_compat() -> Self {
+    pub fn compatibility_catalog() -> Self {
         let mut registry = Self::new();
         for channel in compat_channels() {
             registry.register(channel);
@@ -470,7 +477,7 @@ fn channel_descriptor(id: &str, name: &str, aliases: Vec<&str>) -> ChannelDescri
         ],
         supports_lazy_load: true,
         docs: HelpMetadata {
-            summary: format!("{name} compatibility channel for OpenClaw-style routing."),
+            summary: format!("{name} compatibility channel for local routing."),
             help: format!(
                 "Registers {name} with alias resolution, local-first config, and lazy runtime activation."
             ),
@@ -637,14 +644,14 @@ mod tests {
 
     #[test]
     fn plugin_registry_resolves_aliases() {
-        let reg = PluginRegistry::openclaw_compat();
+        let reg = PluginRegistry::compatibility_catalog();
         let plugin = reg.get("context-memory").expect("plugin alias");
         assert_eq!(plugin.id, "memory");
     }
 
     #[test]
-    fn channel_registry_contains_openclaw_catalog() {
-        let reg = ChannelRegistry::openclaw_compat();
+    fn channel_registry_contains_compatibility_catalog() {
+        let reg = ChannelRegistry::compatibility_catalog();
         assert_eq!(reg.list().len(), 20);
         let channel = reg.get("teams").expect("channel alias");
         assert_eq!(channel.id, "msteams");

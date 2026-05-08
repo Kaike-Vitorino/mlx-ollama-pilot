@@ -7,7 +7,7 @@ use crate::tool_catalog::{
 use mlx_agent_skills::{SkillPackage, TrustLevel};
 use mlx_agent_tools::ExecutionMode;
 use serde::Deserialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -70,6 +70,8 @@ pub struct PolicyConfig {
     pub agent_id: String,
     #[serde(default)]
     pub session_id: Option<String>,
+    #[serde(default)]
+    pub allowed_tool_subset: BTreeSet<String>,
 }
 
 impl Default for PolicyConfig {
@@ -99,6 +101,7 @@ impl Default for PolicyConfig {
             tool_policy: ToolPolicyState::default(),
             agent_id: default_agent_id(),
             session_id: None,
+            allowed_tool_subset: BTreeSet::new(),
         }
     }
 }
@@ -181,6 +184,18 @@ impl PolicyEngine for DefaultPolicyEngine {
             catalog.as_ref(),
         );
         let mut trace = resolved.trace.clone();
+
+        if !self.config.allowed_tool_subset.is_empty()
+            && !self.config.allowed_tool_subset.contains(tool_name)
+        {
+            trace.push(policy_trace("tool_subset", "deny", "not_in_subset"));
+            return deny_inspection(
+                format!("Tool '{tool_name}' is outside the active toolset"),
+                "tool_subset:not_in_subset".to_string(),
+                trace,
+                Some(resolved.risk),
+            );
+        }
 
         if !resolved.implemented {
             return deny_inspection(
@@ -762,9 +777,20 @@ mod tests {
             file_path: PathBuf::from(format!("skills/{name}/SKILL.md")),
             base_dir: PathBuf::from(format!("skills/{name}")),
             body: String::new(),
+            format: mlx_agent_skills::SkillFormat::Native,
+            manifest_version: "1".to_string(),
+            references: Vec::new(),
+            scripts: Vec::new(),
+            templates: Vec::new(),
+            assets: Vec::new(),
+            routines: Vec::new(),
+            workflow_bindings: Vec::new(),
             requires: SkillRequirements::default(),
             capabilities: SkillCapabilities::default(),
+            policy: mlx_agent_skills::SkillPolicy::default(),
             install: Vec::new(),
+            import_source: None,
+            compatibility_notes: Vec::new(),
             sha256: Some("abcd".to_string()),
             trust_level: TrustLevel::Local,
         }
@@ -865,5 +891,33 @@ mod tests {
 
         let decision = policy.check_skill_load(&skill).await;
         assert!(matches!(decision, PolicyDecision::Ask { .. }));
+    }
+
+    #[tokio::test]
+    async fn allowed_tool_subset_blocks_tools_outside_active_toolset() {
+        let policy = DefaultPolicyEngine::new(PolicyConfig {
+            allowed_tool_subset: BTreeSet::from(["read_file".to_string()]),
+            ..PolicyConfig::default()
+        });
+
+        let allowed = policy
+            .check_tool_call(
+                "read_file",
+                &serde_json::json!({"path":"README.md"}),
+                None,
+                ExecutionMode::Full,
+            )
+            .await;
+        assert!(matches!(allowed, PolicyDecision::Allow));
+
+        let denied = policy
+            .check_tool_call(
+                "exec",
+                &serde_json::json!({"command":"git","args":["status"]}),
+                None,
+                ExecutionMode::Full,
+            )
+            .await;
+        assert!(matches!(denied, PolicyDecision::Deny { .. }));
     }
 }
