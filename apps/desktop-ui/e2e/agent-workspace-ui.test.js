@@ -406,7 +406,7 @@ test("agent workspace boots with live summary and toggles config tab", async () 
   }
 });
 
-test("agent workspace prompts, submits runs, and creates sessions", async () => {
+test("agent workspace shortcuts render deterministic diagnostics", async () => {
   const fixture = createFixture();
 
   try {
@@ -419,12 +419,36 @@ test("agent workspace prompts, submits runs, and creates sessions", async () => 
     fixture.document.getElementById("agent-send-btn")?.click();
     await flush();
 
+    assert.ok(!fixture.fetchCalls.some((entry) => entry.path === "/agent/stream"));
+    assert.ok(fixture.fetchCalls.some((entry) => entry.path === "/agent/config"));
+    assert.ok(fixture.fetchCalls.some((entry) => entry.path === "/agent/tools"));
+    assert.match(fixture.document.getElementById("agent-chat-messages")?.textContent || "", /Runtime e politicas/);
+    assert.match(fixture.document.getElementById("agent-chat-messages")?.textContent || "", /Tools ativas/);
+    assert.match(fixture.document.getElementById("console-feed")?.textContent || "", /agent-shortcut/);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("agent workspace freeform submits runs and creates sessions", async () => {
+  const fixture = createFixture();
+
+  try {
+    await flush();
+
+    const input = fixture.document.getElementById("agent-command-input");
+    input.value = "Liste os arquivos do workspace.";
+    input.dispatchEvent(new fixture.window.Event("input", { bubbles: true }));
+    fixture.document.getElementById("agent-send-btn")?.click();
+    await flush();
+
     const runCall = fixture.fetchCalls.find((entry) => entry.path === "/agent/stream");
     assert.ok(runCall);
     assert.equal(runCall.body.model_id, "ollama::qwen3.5:9b");
     assert.match(fixture.document.getElementById("agent-chat-messages")?.textContent || "", /Resposta do agent/);
     assert.match(fixture.document.getElementById("agent-chat-messages")?.textContent || "", /read_file/);
     assert.match(fixture.document.querySelector("#agent-chat-messages .thinking-content")?.textContent || "", /Validando politica final/);
+    assert.match(fixture.document.getElementById("console-feed")?.textContent || "", /agent-tool/);
     const agentAssistantHtml = fixture.document.querySelector("#agent-chat-messages .assistant-message .msg-content")?.innerHTML || "";
     assert.match(agentAssistantHtml, /<h2>Resposta do agent<\/h2>/);
     assert.match(agentAssistantHtml, /<li>Ajuste aplicado<\/li>/);
