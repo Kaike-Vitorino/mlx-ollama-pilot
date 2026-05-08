@@ -178,6 +178,8 @@ export function createAgentControlPlaneController({
   let toolCatalogCache = null;
   let effectivePolicyCache = null;
   let runtimeChannelsCache = [];
+  let providerProfilesCache = [];
+  let toolsetsCache = [];
 
   function status(message) {
     if (typeof onStatus === "function") {
@@ -210,6 +212,55 @@ export function createAgentControlPlaneController({
     }
     if (elements.agentMemoryCompressionSelect) {
       elements.agentMemoryCompressionSelect.value = config.compression_strategy;
+    }
+  }
+
+  function syncRuntimeConfigEditors(config = {}) {
+    toolsetsCache = Array.isArray(toolCatalogCache?.toolsets) ? toolCatalogCache.toolsets : toolsetsCache;
+
+    if (elements.agentRuntimeVariantSelect) {
+      elements.agentRuntimeVariantSelect.value = text(config.runtime_variant, "classic");
+    }
+    if (elements.agentMemoryProfileSelect) {
+      elements.agentMemoryProfileSelect.value = text(config.memory_profile, "balanced");
+    }
+    if (elements.agentMemorySnapshotModeSelect) {
+      elements.agentMemorySnapshotModeSelect.value = text(config.memory_snapshot_mode, "session");
+    }
+    if (elements.agentSessionSearchToggle) {
+      elements.agentSessionSearchToggle.checked = Boolean(config.session_search_enabled);
+    }
+    if (elements.agentPersistToolEventsToggle) {
+      elements.agentPersistToolEventsToggle.checked = Boolean(config.persist_tool_events);
+    }
+    if (elements.agentGatewayModeSelect) {
+      elements.agentGatewayModeSelect.value = text(config.gateway_mode, "local_only");
+    }
+    if (elements.agentToolsetSelect) {
+      const current = elements.agentToolsetSelect.value;
+      elements.agentToolsetSelect.innerHTML = "";
+      toolsetsCache.forEach((toolset) => {
+        const option = document.createElement("option");
+        option.value = toolset.id;
+        option.textContent = `${toolset.id} (${Array.isArray(toolset.enabled_tools) ? toolset.enabled_tools.length : 0} tools)`;
+        elements.agentToolsetSelect.appendChild(option);
+      });
+      elements.agentToolsetSelect.value = text(config.default_toolset_id, current || "general");
+    }
+    if (elements.agentProviderProfileSelect) {
+      const current = elements.agentProviderProfileSelect.value;
+      elements.agentProviderProfileSelect.innerHTML = "";
+      providerProfilesCache.forEach((profile) => {
+        const option = document.createElement("option");
+        option.value = profile.id;
+        option.textContent = `${profile.id} • ${text(profile.provider)} / ${text(profile.model_id)}`;
+        elements.agentProviderProfileSelect.appendChild(option);
+      });
+      elements.agentProviderProfileSelect.value = text(config.provider_profile_id, current || "ollama-local");
+    }
+    if (elements.agentRuntimeStorageMeta) {
+      elements.agentRuntimeStorageMeta.textContent =
+        `runtime ${text(config.runtime_variant, "classic")} • memory ${text(config.memory_profile, "balanced")} • snapshot ${text(config.memory_snapshot_mode, "session")} • toolset ${text(config.default_toolset_id, "general")} • provider profile ${text(config.provider_profile_id, "ollama-local")}`;
     }
   }
 
@@ -503,12 +554,15 @@ export function createAgentControlPlaneController({
   }
 
   async function loadToolPolicies(config = null) {
-    const [catalog, effective] = await Promise.all([
+    const [catalog, effective, providerProfiles] = await Promise.all([
       fetchJson("/agent/tools/catalog", { method: "GET" }),
       fetchJson("/agent/tools/effective-policy", { method: "GET" }),
+      fetchJson("/agent/provider-profiles", { method: "GET" }).catch(() => []),
     ]);
     toolCatalogCache = catalog;
     effectivePolicyCache = effective;
+    providerProfilesCache = Array.isArray(providerProfiles) ? providerProfiles : [];
+    toolsetsCache = Array.isArray(toolCatalogCache?.toolsets) ? toolCatalogCache.toolsets : [];
 
     if (elements.agentToolProfileSelect) {
       const profiles = Array.isArray(toolCatalogCache?.profiles) ? toolCatalogCache.profiles : [];
@@ -526,11 +580,13 @@ export function createAgentControlPlaneController({
     if (elements.agentToolCatalogSummary) {
       const profiles = Array.isArray(toolCatalogCache?.profiles) ? toolCatalogCache.profiles.length : 0;
       const entries = Array.isArray(toolCatalogCache?.entries) ? toolCatalogCache.entries.length : 0;
-      elements.agentToolCatalogSummary.textContent = `${profiles} perfis, ${entries} tools catalogados.`;
+      const toolsets = Array.isArray(toolCatalogCache?.toolsets) ? toolCatalogCache.toolsets.length : 0;
+      elements.agentToolCatalogSummary.textContent = `${profiles} perfis, ${toolsets} toolsets, ${entries} tools catalogados.`;
     }
 
     if (config) {
       syncPolicyEditors(config);
+      syncRuntimeConfigEditors(config);
     }
 
     renderEffectivePolicy();
@@ -582,6 +638,32 @@ export function createAgentControlPlaneController({
       local_enabled: Boolean(elements.agentMemoryLocalToggle?.checked),
     };
 
+    const currentAgentConfig = await loadAgentConfig?.();
+    if (currentAgentConfig && typeof currentAgentConfig === "object") {
+      const nextAgentConfig = {
+        ...currentAgentConfig,
+        runtime_variant: text(elements.agentRuntimeVariantSelect?.value, currentAgentConfig.runtime_variant || "classic"),
+        memory_profile: text(elements.agentMemoryProfileSelect?.value, currentAgentConfig.memory_profile || "balanced"),
+        memory_snapshot_mode: text(elements.agentMemorySnapshotModeSelect?.value, currentAgentConfig.memory_snapshot_mode || "session"),
+        session_search_enabled: elements.agentSessionSearchToggle
+          ? Boolean(elements.agentSessionSearchToggle.checked)
+          : Boolean(currentAgentConfig.session_search_enabled),
+        persist_tool_events: elements.agentPersistToolEventsToggle
+          ? Boolean(elements.agentPersistToolEventsToggle.checked)
+          : Boolean(currentAgentConfig.persist_tool_events),
+        default_toolset_id: text(elements.agentToolsetSelect?.value, currentAgentConfig.default_toolset_id || "general"),
+        provider_profile_id: text(elements.agentProviderProfileSelect?.value, currentAgentConfig.provider_profile_id || "ollama-local"),
+        gateway_mode: text(elements.agentGatewayModeSelect?.value, currentAgentConfig.gateway_mode || "local_only"),
+      };
+
+      await fetchJson("/agent/config", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(nextAgentConfig),
+      });
+      syncRuntimeConfigEditors(nextAgentConfig);
+    }
+
     const response = await fetchJson("/agent/plugins/config", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -591,7 +673,10 @@ export function createAgentControlPlaneController({
         config: nextConfig,
       }),
     });
-    setNodeText(elements.agentMemoryFeedback, `Memoria ${response.enabled ? "habilitada" : "desabilitada"} com backend ${text(nextConfig.backend)}.`);
+    setNodeText(
+      elements.agentMemoryFeedback,
+      `Memoria ${response.enabled ? "habilitada" : "desabilitada"} com backend ${text(nextConfig.backend)}. Runtime ${text(elements.agentRuntimeVariantSelect?.value, "classic")} • toolset ${text(elements.agentToolsetSelect?.value, "general")}.`,
+    );
     await loadPlugins();
     status("Config de memoria atualizada.");
     return response;
@@ -638,14 +723,8 @@ export function createAgentControlPlaneController({
       issues.push(`Daemon reportou ${text(health?.status)}`);
     }
 
-    if (framework === "openclaw") {
-      if (runtime && (runtime.rpc_ok === false || runtime.service_status === "stopped")) {
-        issues.push(`OpenClaw com runtime ${text(runtime.service_status)}/${text(runtime.service_state)}`);
-      }
-    } else if (framework === "nanobot") {
-      if (runtime && runtime.running === false) {
-        issues.push(`NanoBot gateway parado (${text(runtime.status)})`);
-      }
+    if (runtime && runtime.status && runtime.status !== "ok") {
+      issues.push(`Runtime Hermes em estado ${text(runtime.status)}`);
     }
 
     (plugins || [])
@@ -694,11 +773,7 @@ export function createAgentControlPlaneController({
     }
 
     if (elements.agentRuntimeFrameworkMeta) {
-      if (framework === "openclaw") {
-        elements.agentRuntimeFrameworkMeta.textContent = `OpenClaw • service ${text(runtime?.service_status)} • state ${text(runtime?.service_state)} • pid ${text(runtime?.pid)}`;
-      } else {
-        elements.agentRuntimeFrameworkMeta.textContent = `NanoBot • status ${text(runtime?.status)} • running ${runtime?.running ? "sim" : "nao"} • pid ${text(runtime?.pid)}`;
-      }
+      elements.agentRuntimeFrameworkMeta.textContent = `Hermes • status ${text(runtime?.status || "ok")} • pid ${text(runtime?.pid)}`;
     }
 
     renderRuntimeDiagnostics(buildRuntimeDiagnostics({ health, framework, runtime, plugins, channels, budget }));
@@ -810,17 +885,15 @@ export function createAgentControlPlaneController({
   }
 
   async function loadRuntimeHealth() {
-    const config = await fetchJson("/config", { method: "GET" });
-    const framework = config?.active_agent_framework === "nanobot" ? "nanobot" : "openclaw";
-    const requests = [
+    const [health, plugins, channels, budget, agentConfig] = await Promise.all([
       fetchJson("/health", { method: "GET" }),
       fetchJson("/agent/plugins", { method: "GET" }),
       fetchJson("/agent/channels/status", { method: "GET", headers: { "x-channel-protocol-version": "v1" } }),
       loadBudgetTelemetry(),
-      fetchJson(framework === "nanobot" ? "/nanobot/runtime" : "/openclaw/runtime", { method: "GET" }),
-    ];
-
-    const [health, plugins, channels, budget, runtime] = await Promise.all(requests);
+      loadAgentConfig ? loadAgentConfig().catch(() => null) : Promise.resolve(null),
+    ]);
+    const framework = "hermes";
+    const runtime = { status: "ok" };
     runtimeChannelsCache = Array.isArray(channels) ? channels : [];
     pluginsCache = Array.isArray(plugins) ? plugins : pluginsCache;
     renderPlugins();
@@ -835,6 +908,23 @@ export function createAgentControlPlaneController({
       channels: runtimeChannelsCache,
       budget,
     });
+    if (agentConfig) {
+      syncRuntimeConfigEditors(agentConfig);
+      if (elements.agentRuntimeSummary) {
+        const enabledPlugins = pluginsCache.filter((plugin) => plugin.enabled).length;
+        const unhealthyChannels = runtimeChannelsCache.reduce(
+          (count, channel) =>
+            count +
+            (channel.accounts || []).filter((account) => {
+              const state = account.health_state?.status || "unknown";
+              return !["healthy", "idle", "not_logged_in"].includes(state);
+            }).length,
+          0,
+        );
+        elements.agentRuntimeSummary.textContent =
+          `daemon ${text(health?.status)} • framework ${framework} • runtime ${text(agentConfig.runtime_variant, "classic")} • toolset ${text(agentConfig.default_toolset_id, "general")} • provider profile ${text(agentConfig.provider_profile_id, "ollama-local")} • plugins ativos ${enabledPlugins} • canais degradados ${unhealthyChannels}`;
+      }
+    }
     await loadRuntimeLogs();
     return { health, framework, runtime, plugins: pluginsCache, channels: runtimeChannelsCache, budget };
   }

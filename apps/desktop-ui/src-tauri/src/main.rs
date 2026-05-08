@@ -1,15 +1,150 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use serde::Serialize;
+use std::fs::{self, OpenOptions};
+use std::io::{Read, Write};
 use std::net::TcpListener;
+use std::path::PathBuf;
 use std::sync::OnceLock;
 use tauri::Manager;
 
 static DAEMON_BOOTSTRAPPED: OnceLock<()> = OnceLock::new();
 static DAEMON_BASE_URL: OnceLock<String> = OnceLock::new();
+static DESKTOP_LOG_PATH: OnceLock<PathBuf> = OnceLock::new();
 
 const DEFAULT_DAEMON_HOST: &str = "127.0.0.1";
 const DEFAULT_DAEMON_PORT: u16 = 11435;
 const DAEMON_PORT_SCAN_LIMIT: u16 = 12;
+
+#[derive(Serialize)]
+struct DesktopRuntimeInfo {
+    daemon_url: String,
+    embedded_daemon_enabled: bool,
+    log_path: String,
+    pid: u32,
+}
+
+#[derive(Serialize)]
+struct DesktopLogSnapshot {
+    path: String,
+    entries: Vec<String>,
+}
+
+fn default_desktop_log_path() -> PathBuf {
+    if let Ok(path) = std::env::var("MLX_PILOT_DESKTOP_LOG") {
+        let trimmed = path.trim();
+        if !trimmed.is_empty() {
+            return PathBuf::from(trimmed);
+        }
+    }
+
+    if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
+        return PathBuf::from(local_app_data)
+            .join("MLX Pilot")
+            .join("logs")
+            .join("desktop.log");
+    }
+
+    if let Ok(home) = std::env::var("HOME") {
+        return PathBuf::from(home)
+            .join(".local")
+            .join("share")
+            .join("mlx-pilot")
+            .join("logs")
+            .join("desktop.log");
+    }
+
+    std::env::temp_dir()
+        .join("mlx-pilot")
+        .join("logs")
+        .join("desktop.log")
+}
+
+fn desktop_log_path() -> PathBuf {
+    DESKTOP_LOG_PATH
+        .get_or_init(default_desktop_log_path)
+        .clone()
+}
+
+fn unix_timestamp_millis() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or_default()
+}
+
+fn append_desktop_log_line(level: &str, message: &str) {
+    let path = desktop_log_path();
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+
+    let sanitized = message.replace(['\r', '\n'], " ");
+    let line = format!(
+        "{} [{}] {}\n",
+        unix_timestamp_millis(),
+        level.trim().to_ascii_uppercase(),
+        sanitized.trim()
+    );
+
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
+        let _ = file.write_all(line.as_bytes());
+    }
+}
+
+fn read_desktop_log_tail(limit: usize) -> Vec<String> {
+    let path = desktop_log_path();
+    let mut content = String::new();
+    let Ok(mut file) = OpenOptions::new().read(true).open(path) else {
+        return Vec::new();
+    };
+    if file.read_to_string(&mut content).is_err() {
+        return Vec::new();
+    }
+
+    let limit = limit.clamp(1, 1000);
+    let mut entries = content
+        .lines()
+        .rev()
+        .take(limit)
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    entries.reverse();
+    entries
+}
+
+#[tauri::command]
+fn desktop_runtime_info() -> DesktopRuntimeInfo {
+    DesktopRuntimeInfo {
+        daemon_url: current_daemon_url(),
+        embedded_daemon_enabled: should_bootstrap_embedded_daemon(),
+        log_path: desktop_log_path().display().to_string(),
+        pid: std::process::id(),
+    }
+}
+
+#[tauri::command]
+fn desktop_log_snapshot(limit: Option<usize>) -> DesktopLogSnapshot {
+    DesktopLogSnapshot {
+        path: desktop_log_path().display().to_string(),
+        entries: read_desktop_log_tail(limit.unwrap_or(250)),
+    }
+}
+
+#[tauri::command]
+fn desktop_log_append(level: String, message: String) {
+    append_desktop_log_line(&level, &message);
+}
+
+#[tauri::command]
+fn desktop_log_clear() -> Result<(), String> {
+    let path = desktop_log_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("failed to create log directory: {error}"))?;
+    }
+    fs::write(&path, "").map_err(|error| format!("failed to clear desktop log: {error}"))
+}
 
 fn should_bootstrap_embedded_daemon() -> bool {
     match std::env::var("MLX_PILOT_DISABLE_EMBEDDED_DAEMON") {
@@ -114,18 +249,25 @@ fn inject_daemon_bootstrap_into_webview(webview: &tauri::Webview) {
 fn bootstrap_embedded_daemon() {
     if !should_bootstrap_embedded_daemon() {
         let _ = current_daemon_url();
+        append_desktop_log_line("info", "embedded daemon disabled by environment");
         return;
     }
 
     let bind_addr = resolve_embedded_daemon_bind_addr();
-    store_daemon_url(&bind_addr);
+    let daemon_url = store_daemon_url(&bind_addr);
+    append_desktop_log_line("info", &format!("embedded daemon binding to {daemon_url}"));
 
     if DAEMON_BOOTSTRAPPED.set(()).is_err() {
+        append_desktop_log_line("info", "embedded daemon already bootstrapped");
         return;
     }
 
     tauri::async_runtime::spawn(async {
         if let Err(error) = mlx_ollama_daemon::run().await {
+            append_desktop_log_line(
+                "error",
+                &format!("embedded daemon failed to start: {error}"),
+            );
             eprintln!("embedded daemon failed to start: {error}");
         }
     });
@@ -133,7 +275,14 @@ fn bootstrap_embedded_daemon() {
 
 fn main() {
     tauri::Builder::default()
+        .invoke_handler(tauri::generate_handler![
+            desktop_runtime_info,
+            desktop_log_snapshot,
+            desktop_log_append,
+            desktop_log_clear
+        ])
         .setup(|app| {
+            append_desktop_log_line("info", "desktop shell starting");
             bootstrap_embedded_daemon();
 
             // Get the main webview window

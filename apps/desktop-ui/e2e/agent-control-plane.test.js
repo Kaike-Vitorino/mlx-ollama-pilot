@@ -42,8 +42,30 @@ function createFixtureDom() {
           <option value="adaptive">adaptive</option>
           <option value="aggressive">aggressive</option>
         </select>
+        <select id="agent-runtime-variant-select">
+          <option value="classic">classic</option>
+          <option value="hermes_inspired">hermes_inspired</option>
+        </select>
+        <select id="agent-memory-profile-select">
+          <option value="minimal">minimal</option>
+          <option value="balanced">balanced</option>
+          <option value="full">full</option>
+        </select>
+        <select id="agent-memory-snapshot-mode-select">
+          <option value="session">session</option>
+          <option value="off">off</option>
+        </select>
+        <input id="agent-session-search-toggle" type="checkbox" />
+        <input id="agent-persist-tool-events-toggle" type="checkbox" />
+        <select id="agent-toolset-select"></select>
+        <select id="agent-provider-profile-select"></select>
+        <select id="agent-gateway-mode-select">
+          <option value="local_only">local_only</option>
+          <option value="gateway_ready">gateway_ready</option>
+        </select>
         <button id="agent-memory-save-btn" type="button">save-memory</button>
         <p id="agent-memory-feedback">-</p>
+        <p id="agent-runtime-storage-meta">-</p>
 
         <button id="agent-budget-refresh-btn" type="button">budget</button>
         <pre id="agent-budget-telemetry">-</pre>
@@ -113,6 +135,24 @@ class FakeControlPlaneBackend {
   constructor() {
     this.profile = "coding";
     this.agentConfig = {
+      runtime_variant: "hermes_inspired",
+      memory_profile: "balanced",
+      memory_snapshot_mode: "session",
+      session_search_enabled: true,
+      persist_tool_events: false,
+      default_toolset_id: "general",
+      provider_profile_id: "ollama-local",
+      gateway_mode: "local_only",
+      provider_profiles: [
+        {
+          id: "ollama-local",
+          provider: "ollama",
+          model_id: "qwen3.5:9b",
+          base_url: "http://127.0.0.1:11434",
+          custom_headers: {},
+          runtime_variant: "hermes_inspired",
+        },
+      ],
       tool_policy: {
         profile: "coding",
         agent_overrides: {
@@ -231,6 +271,10 @@ class FakeControlPlaneBackend {
           { id: "coding", tools: ["read_file", "list_dir"] },
           { id: "full", tools: ["read_file", "list_dir", "exec"] },
         ],
+        toolsets: [
+          { id: "general", enabled_tools: ["read_file", "list_dir", "memory_search"] },
+          { id: "full", enabled_tools: ["read_file", "list_dir", "exec", "delegate_session"] },
+        ],
         entries: [{ name: "read_file" }, { name: "list_dir" }, { name: "exec" }],
       };
     }
@@ -280,16 +324,21 @@ class FakeControlPlaneBackend {
       return clone(this.agentConfig);
     }
 
+    if (path === "/agent/config" && method === "POST") {
+      this.agentConfig = clone(body);
+      return clone(this.agentConfig);
+    }
+
+    if (path === "/agent/provider-profiles" && method === "GET") {
+      return clone(this.agentConfig.provider_profiles);
+    }
+
     if (path === "/health" && method === "GET") {
       return { status: "ok", provider: "mlx" };
     }
 
     if (path === "/config" && method === "GET") {
-      return { active_agent_framework: "openclaw" };
-    }
-
-    if (path === "/openclaw/runtime" && method === "GET") {
-      return { service_status: "running", service_state: "ready", rpc_ok: true, pid: 777 };
+      return {};
     }
 
     if (path === "/agent/channels/status" && method === "GET") {
@@ -350,8 +399,17 @@ function collectElements(document) {
     agentMemoryLocalToggle: document.getElementById("agent-memory-local-toggle"),
     agentMemoryBackendSelect: document.getElementById("agent-memory-backend-select"),
     agentMemoryCompressionSelect: document.getElementById("agent-memory-compression-select"),
+    agentRuntimeVariantSelect: document.getElementById("agent-runtime-variant-select"),
+    agentMemoryProfileSelect: document.getElementById("agent-memory-profile-select"),
+    agentMemorySnapshotModeSelect: document.getElementById("agent-memory-snapshot-mode-select"),
+    agentSessionSearchToggle: document.getElementById("agent-session-search-toggle"),
+    agentPersistToolEventsToggle: document.getElementById("agent-persist-tool-events-toggle"),
+    agentToolsetSelect: document.getElementById("agent-toolset-select"),
+    agentProviderProfileSelect: document.getElementById("agent-provider-profile-select"),
+    agentGatewayModeSelect: document.getElementById("agent-gateway-mode-select"),
     agentMemorySaveBtn: document.getElementById("agent-memory-save-btn"),
     agentMemoryFeedback: document.getElementById("agent-memory-feedback"),
+    agentRuntimeStorageMeta: document.getElementById("agent-runtime-storage-meta"),
     agentBudgetRefreshBtn: document.getElementById("agent-budget-refresh-btn"),
     agentBudgetTelemetry: document.getElementById("agent-budget-telemetry"),
     agentMaxPromptInput: document.getElementById("agent-max-prompt-input"),
@@ -400,17 +458,24 @@ test("control plane smoke saves memory plugin config, switches profile, and rend
     await controller.loadRuntimeHealth();
 
     assert.match(dom.window.document.getElementById("agent-plugins-list").textContent, /Memory/);
+    assert.match(dom.window.document.getElementById("agent-tool-catalog-summary").textContent, /toolsets/);
+    assert.equal(dom.window.document.getElementById("agent-runtime-variant-select").value, "hermes_inspired");
     assert.match(dom.window.document.getElementById("agent-runtime-summary").textContent, /plugins ativos 1/);
     assert.match(dom.window.document.getElementById("agent-runtime-log-list").textContent, /telegram:bot-a/);
 
     dom.window.document.getElementById("agent-memory-local-toggle").checked = false;
     dom.window.document.getElementById("agent-memory-backend-select").value = "sqlite";
     dom.window.document.getElementById("agent-memory-compression-select").value = "aggressive";
+    dom.window.document.getElementById("agent-runtime-variant-select").value = "classic";
+    dom.window.document.getElementById("agent-toolset-select").value = "full";
+    dom.window.document.getElementById("agent-provider-profile-select").value = "ollama-local";
     dom.window.document.getElementById("agent-memory-save-btn").click();
     await flushUi();
 
     assert.equal(backend.plugins.find((entry) => entry.id === "memory").enabled, false);
     assert.equal(backend.plugins.find((entry) => entry.id === "memory").config.backend, "sqlite");
+    assert.equal(backend.agentConfig.runtime_variant, "classic");
+    assert.equal(backend.agentConfig.default_toolset_id, "full");
     assert.match(dom.window.document.getElementById("agent-memory-feedback").textContent, /backend sqlite/);
 
     dom.window.document.getElementById("agent-tool-profile-select").value = "full";

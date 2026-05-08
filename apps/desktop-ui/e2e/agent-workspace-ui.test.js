@@ -56,8 +56,9 @@ function createFixture({
   modelsResponse,
   cachedModels,
   cachedCurrentModel,
-  openClawAvailable = true,
   agentConfigResponse,
+  environmentResponseHidden,
+  environmentResponseRevealed,
 } = {}) {
   let sessions = [
     { id: "sess-1", name: "Operacao", message_count: 3 },
@@ -65,6 +66,8 @@ function createFixture({
   ];
   let nextSession = 3;
   const fetchCalls = [];
+  const hiddenEnvironment = environmentResponseHidden ?? { variables: [] };
+  const revealedEnvironment = environmentResponseRevealed ?? hiddenEnvironment;
 
   const dom = new JSDOM(indexHtml, {
     url: "http://localhost/",
@@ -74,6 +77,7 @@ function createFixture({
 
   const { window } = dom;
   const { document } = window;
+  const nativeCalls = [];
 
   window.TextEncoder = TextEncoder;
   window.TextDecoder = TextDecoder;
@@ -113,6 +117,34 @@ function createFixture({
   window.confirm = () => true;
   window.prompt = () => "slack";
   window.open = () => {};
+  window.__TAURI__ = {
+    core: {
+      async invoke(command, args = {}) {
+        nativeCalls.push({ command, args });
+        if (command === "desktop_runtime_info") {
+          return {
+            daemon_url: "http://127.0.0.1:11436",
+            embedded_daemon_enabled: true,
+            log_path: "C:/Users/kaike/AppData/Local/MLX Pilot/logs/desktop.log",
+            pid: 4242,
+          };
+        }
+        if (command === "desktop_log_snapshot") {
+          return {
+            path: "C:/Users/kaike/AppData/Local/MLX Pilot/logs/desktop.log",
+            entries: [
+              "1778200000000 [INFO] desktop shell starting",
+              "1778200001000 [INFO] embedded daemon binding to http://127.0.0.1:11436",
+            ],
+          };
+        }
+        if (command === "desktop_log_append" || command === "desktop_log_clear") {
+          return null;
+        }
+        throw new Error(`Unhandled native command: ${command}`);
+      },
+    },
+  };
 
   Object.defineProperty(window.navigator, "clipboard", {
     configurable: true,
@@ -135,10 +167,7 @@ function createFixture({
 
     if (path === "/config") {
       return jsonResponse({
-        active_agent_framework: "openclaw",
         models_dir: "G:/models",
-        openclaw_cli_path: "G:/bin/openclaw.exe",
-        openclaw_state_dir: "G:/state/openclaw",
       });
     }
 
@@ -169,19 +198,23 @@ function createFixture({
       ]);
     }
 
-    if (path === "/openclaw/status") {
-      return jsonResponse({
-        available: openClawAvailable,
-        cli_exists: openClawAvailable,
-      });
-    }
-
     if (path === "/agent/config" && method === "GET") {
       return jsonResponse(agentConfigResponse ?? {
         provider: "ollama",
         model_id: "qwen3.5:9b",
         execution_mode: "full",
         approval_mode: "ask",
+        provider_profiles: [
+          {
+            id: "ollama-local",
+            provider: "ollama",
+            model_id: "qwen3.5:9b",
+            base_url: "http://127.0.0.1:11434",
+            api_key_ref: null,
+            custom_headers: {},
+            runtime_variant: "classic",
+          },
+        ],
       });
     }
 
@@ -263,8 +296,16 @@ function createFixture({
       });
     }
 
-    if (path === "/environment?reveal=false" || path === "/environment?reveal=true") {
-      return jsonResponse({ variables: [] });
+    if (path === "/environment?reveal=false") {
+      return jsonResponse(hiddenEnvironment);
+    }
+
+    if (path === "/environment?reveal=true") {
+      return jsonResponse(revealedEnvironment);
+    }
+
+    if (path === "/environment" && method === "POST") {
+      return jsonResponse(hiddenEnvironment);
     }
 
     if (path === "/chat/stream" && method === "POST") {
@@ -319,6 +360,7 @@ function createFixture({
     window,
     document,
     fetchCalls,
+    nativeCalls,
     cleanup() {
       dom.window.close();
     },
@@ -329,7 +371,7 @@ test("agent workspace boots with live summary and toggles config tab", async () 
   const fixture = createFixture();
 
   try {
-    await flush();
+    await flush(10);
 
     assert.ok(fixture.fetchCalls.some((entry) => entry.url.startsWith("http://127.0.0.1:11436/")));
     assert.equal(fixture.document.getElementById("agent-daemon-status")?.textContent, "Online");
@@ -410,7 +452,7 @@ test("chat stream shows thinking and renders markdown output", async () => {
   }
 });
 
-test("workspace hides OpenClaw when unavailable and preserves cached model shell", async () => {
+test("workspace preserves cached model shell when no installed model is returned", async () => {
   const fixture = createFixture({
     modelsResponse: [],
     cachedModels: [
@@ -422,13 +464,11 @@ test("workspace hides OpenClaw when unavailable and preserves cached model shell
       },
     ],
     cachedCurrentModel: "cached/qwen-local",
-    openClawAvailable: false,
   });
 
   try {
     await flush();
 
-    assert.ok(fixture.document.getElementById("tab-openclaw")?.classList.contains("hidden"));
     assert.equal(fixture.document.getElementById("current-model")?.textContent, "Qwen Local");
     assert.match(fixture.document.getElementById("installed-count")?.textContent || "", /modelo/);
   } finally {
@@ -447,7 +487,7 @@ test("agent filtra modelos chat-only e repara para qwen3.5:9b", async () => {
   });
 
   try {
-    await flush(6);
+    await flush(12);
 
     fixture.document.querySelector('.tab[data-panel="agent"]')?.click();
     await flush(4);
@@ -469,6 +509,271 @@ test("agent filtra modelos chat-only e repara para qwen3.5:9b", async () => {
   }
 });
 
+test("agent provider selector agrupa local como MLX-Pilot e mostra cloud apenas com secret configurado", async () => {
+  const fixture = createFixture({
+    agentConfigResponse: {
+      provider: "ollama",
+      model_id: "qwen3.5:9b",
+      execution_mode: "full",
+      approval_mode: "ask",
+      provider_profiles: [
+        {
+          id: "ollama-local",
+          provider: "ollama",
+          model_id: "qwen3.5:9b",
+          base_url: "http://127.0.0.1:11434",
+          api_key_ref: null,
+          custom_headers: {},
+          runtime_variant: "classic",
+        },
+        {
+          id: "openai-prod",
+          provider: "openai",
+          model_id: "gpt-4o-mini",
+          base_url: "https://api.openai.com/v1",
+          api_key_ref: null,
+          custom_headers: {},
+          runtime_variant: "classic",
+        },
+        {
+          id: "anthropic-prod",
+          provider: "anthropic",
+          model_id: "claude-3.5-sonnet",
+          base_url: "",
+          api_key_ref: null,
+          custom_headers: {},
+          runtime_variant: "classic",
+        },
+      ],
+    },
+    environmentResponseHidden: {
+      variables: [
+        {
+          key: "OPENAI_API_KEY",
+          value: "",
+          masked: "sk-****abcd",
+          source: "env_file",
+          present: true,
+          is_secret: true,
+        },
+        {
+          key: "ANTHROPIC_API_KEY",
+          value: "",
+          masked: "-",
+          source: "catalog",
+          present: false,
+          is_secret: true,
+        },
+      ],
+    },
+  });
+
+  try {
+    await flush(12);
+
+    fixture.document.querySelector('.tab[data-panel="agent"]')?.click();
+    fixture.document.querySelector('.agent-view-tab[data-agent-view="config"]')?.click();
+    await flush(3);
+
+    const providerSelect = fixture.document.getElementById("agent-provider-select");
+    const options = Array.from(providerSelect?.options || []).map((option) => option.textContent);
+    assert.deepEqual(options, ["MLX-Pilot (local)", "OpenAI (gpt-4o-mini)"]);
+
+    providerSelect.value = "cloud:openai";
+    providerSelect.dispatchEvent(new fixture.window.Event("change", { bubbles: true }));
+    await flush(4);
+
+    const saveCall = fixture.fetchCalls.find((entry) =>
+      entry.path === "/agent/config"
+      && entry.method === "POST"
+      && entry.body?.provider === "openai"
+    );
+    assert.ok(saveCall);
+    assert.equal(saveCall.body.model_id, "gpt-4o-mini");
+    assert.match(fixture.document.getElementById("agent-provider-pill")?.textContent || "", /OpenAI/);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("agent provider profiles podem ser editados e salvos pela aba do agent", async () => {
+  const fixture = createFixture({
+    agentConfigResponse: {
+      provider: "ollama",
+      model_id: "qwen3.5:9b",
+      execution_mode: "full",
+      approval_mode: "ask",
+      provider_profiles: [
+        {
+          id: "ollama-local",
+          provider: "ollama",
+          model_id: "qwen3.5:9b",
+          base_url: "http://127.0.0.1:11434",
+          api_key_ref: null,
+          custom_headers: {},
+          runtime_variant: "classic",
+        },
+        {
+          id: "openai-prod",
+          provider: "openai",
+          model_id: "gpt-4o-mini",
+          base_url: "https://api.openai.com/v1",
+          api_key_ref: null,
+          custom_headers: {},
+          runtime_variant: "classic",
+        },
+      ],
+    },
+  });
+
+  try {
+    await flush(12);
+
+    fixture.document.querySelector('.tab[data-panel="agent"]')?.click();
+    fixture.document.querySelector('.agent-view-tab[data-agent-view="config"]')?.click();
+    await flush(3);
+
+    const profileRow = fixture.document.querySelector('[data-profile-id="openai-prod"]');
+    const modelInput = profileRow?.querySelector('[data-field="model_id"]');
+    const secretRefInput = profileRow?.querySelector('[data-field="api_key_ref"]');
+    const runtimeSelect = profileRow?.querySelector('[data-field="runtime_variant"]');
+
+    modelInput.value = "gpt-4.1-mini";
+    modelInput.dispatchEvent(new fixture.window.Event("input", { bubbles: true }));
+    secretRefInput.value = "OPENAI_API_KEY";
+    secretRefInput.dispatchEvent(new fixture.window.Event("input", { bubbles: true }));
+    runtimeSelect.value = "hermes_inspired";
+    runtimeSelect.dispatchEvent(new fixture.window.Event("change", { bubbles: true }));
+
+    fixture.document.getElementById("agent-save-provider-profiles")?.click();
+    await flush(4);
+
+    const saveCall = fixture.fetchCalls.find((entry) =>
+      entry.path === "/agent/config"
+      && entry.method === "POST"
+      && Array.isArray(entry.body?.provider_profiles)
+      && entry.body.provider_profiles.some((profile) => profile.id === "openai-prod" && profile.model_id === "gpt-4.1-mini")
+    );
+    assert.ok(saveCall);
+
+    const savedProfile = saveCall.body.provider_profiles.find((profile) => profile.id === "openai-prod");
+    assert.equal(savedProfile.api_key_ref, "OPENAI_API_KEY");
+    assert.equal(savedProfile.runtime_variant, "hermes_inspired");
+
+    const providerOptions = Array.from(fixture.document.getElementById("agent-provider-select")?.options || []).map((option) => option.textContent);
+    assert.ok(providerOptions.includes("OpenAI (gpt-4.1-mini)"));
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("agent provider profile pode ser ativado direto na configuracao", async () => {
+  const fixture = createFixture({
+    agentConfigResponse: {
+      provider: "ollama",
+      model_id: "qwen3.5:9b",
+      execution_mode: "full",
+      approval_mode: "ask",
+      provider_profiles: [
+        {
+          id: "ollama-local",
+          provider: "ollama",
+          model_id: "qwen3.5:9b",
+          base_url: "http://127.0.0.1:11434",
+          api_key_ref: null,
+          custom_headers: {},
+          runtime_variant: "classic",
+        },
+        {
+          id: "openai-prod",
+          provider: "openai",
+          model_id: "gpt-4o-mini",
+          base_url: "https://api.openai.com/v1",
+          api_key_ref: "OPENAI_API_KEY",
+          custom_headers: {},
+          runtime_variant: "classic",
+        },
+      ],
+    },
+  });
+
+  try {
+    await flush(12);
+
+    fixture.document.querySelector('.tab[data-panel="agent"]')?.click();
+    fixture.document.querySelector('.agent-view-tab[data-agent-view="config"]')?.click();
+    await flush(3);
+
+    fixture.document.querySelector('[data-profile-id="openai-prod"] [data-action="use"]')?.click();
+    await flush(4);
+
+    const useCall = fixture.fetchCalls.find((entry) =>
+      entry.path === "/agent/config"
+      && entry.method === "POST"
+      && entry.body?.provider_profile_id === "openai-prod"
+      && entry.body?.provider === "openai"
+    );
+    assert.ok(useCall);
+    assert.equal(useCall.body.model_id, "gpt-4o-mini");
+    assert.match(fixture.document.getElementById("agent-provider-pill")?.textContent || "", /OpenAI/);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("environment reveal mostra secret salvo e nao depende de campo vazio", async () => {
+  const fixture = createFixture({
+    environmentResponseHidden: {
+      variables: [
+        {
+          key: "OPENAI_API_KEY",
+          value: "",
+          masked: "sk-****1234",
+          source: "env_file",
+          present: true,
+          is_secret: true,
+        },
+      ],
+    },
+    environmentResponseRevealed: {
+      variables: [
+        {
+          key: "OPENAI_API_KEY",
+          value: "sk-live-123456",
+          masked: "sk-****1234",
+          source: "env_file",
+          present: true,
+          is_secret: true,
+        },
+      ],
+    },
+  });
+
+  try {
+    await flush(6);
+
+    const revealButton = fixture.document.querySelector("#env-table .reveal-btn");
+    const secretInput = fixture.document.querySelector("#env-table .env-val");
+    assert.equal(secretInput?.value, "sk-****1234");
+    assert.equal(secretInput?.type, "password");
+
+    revealButton?.click();
+    await flush(3);
+
+    assert.equal(secretInput?.value, "sk-live-123456");
+    assert.equal(secretInput?.type, "text");
+    assert.equal(revealButton?.textContent, "Ocultar");
+
+    revealButton?.click();
+    await flush(2);
+
+    assert.equal(secretInput?.type, "password");
+    assert.equal(secretInput?.value, "sk-****1234");
+  } finally {
+    fixture.cleanup();
+  }
+});
+
 test("sidebar global aparece apenas no chat e some nas outras abas", async () => {
   const fixture = createFixture();
 
@@ -484,6 +789,33 @@ test("sidebar global aparece apenas no chat e some nas outras abas", async () =>
     fixture.document.querySelector('.tab[data-panel="chat"]')?.click();
     await flush(2);
     assert.equal(fixture.document.getElementById("app")?.classList.contains("chat-sidebar-visible"), true);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test("console mostra diagnostico nativo e permite limpar logs", async () => {
+  const fixture = createFixture();
+
+  try {
+    await flush(8);
+
+    fixture.document.querySelector('.tab[data-panel="console"]')?.click();
+    await flush(4);
+
+    assert.equal(fixture.document.getElementById("panel-console")?.classList.contains("active"), true);
+    assert.equal(fixture.document.getElementById("console-health")?.textContent, "Online");
+    assert.match(fixture.document.getElementById("console-process")?.textContent || "", /PID 4242/);
+    assert.match(fixture.document.getElementById("console-log-path")?.textContent || "", /desktop\.log/);
+    assert.match(fixture.document.getElementById("console-feed")?.textContent || "", /desktop shell starting/);
+    assert.ok(fixture.nativeCalls.some((entry) => entry.command === "desktop_runtime_info"));
+    assert.ok(fixture.nativeCalls.some((entry) => entry.command === "desktop_log_snapshot"));
+
+    fixture.document.getElementById("clear-console")?.click();
+    await flush(2);
+
+    assert.ok(fixture.nativeCalls.some((entry) => entry.command === "desktop_log_clear"));
+    assert.match(fixture.document.getElementById("console-feed")?.textContent || "", /Console limpo/);
   } finally {
     fixture.cleanup();
   }

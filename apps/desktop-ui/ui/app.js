@@ -13,6 +13,62 @@
   const MIN_SPLASH_MS = 480;
   const MODEL_CACHE_KEY = 'mlxPilotModelCache';
   const CURRENT_MODEL_KEY = 'mlxPilotCurrentModel';
+  const AGENT_LOCAL_PROVIDER_CHOICE = 'mlx-pilot-local';
+  const CLOUD_PROVIDER_DEFAULTS = {
+    anthropic: {
+      label: 'Anthropic',
+      modelId: 'claude-3.5-sonnet',
+      secretKeys: ['ANTHROPIC_API_KEY'],
+    },
+    openai: {
+      label: 'OpenAI',
+      modelId: 'gpt-4o-mini',
+      secretKeys: ['OPENAI_API_KEY'],
+    },
+    openrouter: {
+      label: 'OpenRouter',
+      modelId: 'openai/gpt-4o-mini',
+      secretKeys: ['OPENROUTER_API_KEY'],
+    },
+    deepseek: {
+      label: 'DeepSeek',
+      modelId: 'deepseek-chat',
+      secretKeys: ['DEEPSEEK_API_KEY'],
+    },
+    groq: {
+      label: 'Groq',
+      modelId: 'llama-3.3-70b-versatile',
+      secretKeys: ['GROQ_API_KEY'],
+    },
+    gemini: {
+      label: 'Gemini',
+      modelId: 'gemini-2.0-flash',
+      secretKeys: ['GEMINI_API_KEY', 'GOOGLE_API_KEY'],
+    },
+    zai: {
+      label: 'ZAI',
+      modelId: 'glm-4.5',
+      secretKeys: ['ZAI_API_KEY'],
+    },
+    perplexity: {
+      label: 'Perplexity',
+      modelId: 'sonar-pro',
+      secretKeys: ['PERPLEXITY_API_KEY'],
+    },
+  };
+  const AGENT_PROVIDER_PROFILE_TYPES = [
+    { value: 'ollama', label: 'Ollama (local)' },
+    { value: 'mlx', label: 'MLX (local)' },
+    { value: 'llamacpp', label: 'llama.cpp (local)' },
+    { value: 'openai', label: 'OpenAI' },
+    { value: 'anthropic', label: 'Anthropic' },
+    { value: 'openrouter', label: 'OpenRouter' },
+    { value: 'deepseek', label: 'DeepSeek' },
+    { value: 'groq', label: 'Groq' },
+    { value: 'gemini', label: 'Gemini' },
+    { value: 'zai', label: 'ZAI' },
+    { value: 'perplexity', label: 'Perplexity' },
+  ];
 
   function readStorage(key) {
     try {
@@ -54,7 +110,6 @@
     daemonConfig: null,
     catalogModels: [],
     downloads: [],
-    openclawFramework: 'openclaw',
     agentConfig: null,
     agentSessions: [],
     currentSessionId: null,
@@ -64,10 +119,69 @@
     tools: [],
     channels: [],
     environmentVars: [],
+    agentProviderOptions: [],
+    consoleEntries: [],
+    desktopLogEntries: [],
+    desktopRuntimeInfo: null,
     activeDiscoverTab: 'catalog',
-    openclawInstalled: false,
     activePanel: 'chat',
   };
+
+  const originalConsole = {
+    log: console.log.bind(console),
+    info: console.info.bind(console),
+    warn: console.warn.bind(console),
+    error: console.error.bind(console),
+  };
+
+  function nativeInvoke(command, args = {}) {
+    const invoke = window.__TAURI__?.core?.invoke || window.__TAURI__?.tauri?.invoke;
+    if (typeof invoke !== 'function') {
+      return Promise.reject(new Error('Runtime Tauri indisponivel'));
+    }
+    return invoke(command, args);
+  }
+
+  function stringifyConsoleArg(value) {
+    if (value instanceof Error) return value.stack || value.message;
+    if (typeof value === 'string') return value;
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return String(value);
+    }
+  }
+
+  function pushConsoleEntry(level, source, message) {
+    const entry = {
+      time: new Date().toISOString(),
+      level: String(level || 'info').toLowerCase(),
+      source: source || 'ui',
+      message: String(message || '').replace(/\s+/g, ' ').trim(),
+    };
+    state.consoleEntries.push(entry);
+    if (state.consoleEntries.length > 300) state.consoleEntries.shift();
+    void nativeInvoke('desktop_log_append', {
+      level: entry.level,
+      message: `${entry.source}: ${entry.message}`,
+    }).catch(() => {});
+    renderConsole();
+  }
+
+  ['log', 'info', 'warn', 'error'].forEach((level) => {
+    console[level] = (...args) => {
+      originalConsole[level](...args);
+      pushConsoleEntry(level === 'log' ? 'info' : level, 'ui', args.map(stringifyConsoleArg).join(' '));
+    };
+  });
+
+  window.addEventListener('error', (event) => {
+    pushConsoleEntry('error', 'window', `${event.message || 'Erro sem mensagem'} ${event.filename || ''}:${event.lineno || 0}`);
+  });
+
+  window.addEventListener('unhandledrejection', (event) => {
+    pushConsoleEntry('error', 'promise', stringifyConsoleArg(event.reason || 'Promise rejeitada sem motivo'));
+  });
 
   function stripModelDecoration(value) {
     return String(value || '')
@@ -78,6 +192,49 @@
 
   function humanizeModelLabel(value) {
     return stripModelDecoration(value).replace(/^(ollama|mlx|llama)::/i, '').trim();
+  }
+
+  function normalizeProviderId(provider) {
+    const normalized = String(provider || '').trim().toLowerCase();
+    if (!normalized) return '';
+    if (normalized === AGENT_LOCAL_PROVIDER_CHOICE || normalized === 'mlx-pilot') return 'mlx-pilot';
+    if (normalized.includes('ollama')) return 'ollama';
+    if (normalized === 'mlx' || normalized.includes('mlx')) return 'mlx';
+    if (normalized.includes('llama')) return 'llamacpp';
+    if (normalized.includes('anthropic')) return 'anthropic';
+    if (normalized.includes('openrouter')) return 'openrouter';
+    if (normalized.includes('deepseek')) return 'deepseek';
+    if (normalized.includes('groq')) return 'groq';
+    if (normalized.includes('gemini') || normalized.includes('google')) return 'gemini';
+    if (normalized.includes('zai') || normalized.includes('zhipu')) return 'zai';
+    if (normalized.includes('perplexity')) return 'perplexity';
+    if (normalized.includes('openai')) return 'openai';
+    if (normalized === 'local' || normalized === 'auto') return normalized;
+    return normalized;
+  }
+
+  function isLocalProvider(provider) {
+    const normalized = normalizeProviderId(provider);
+    return normalized === 'mlx-pilot'
+      || normalized === 'ollama'
+      || normalized === 'mlx'
+      || normalized === 'llamacpp'
+      || normalized === 'local'
+      || normalized === 'auto';
+  }
+
+  function providerDisplayName(provider) {
+    const normalized = normalizeProviderId(provider);
+    if (isLocalProvider(normalized)) return 'MLX-Pilot';
+    if (normalized === 'openai') return 'OpenAI';
+    if (normalized === 'anthropic') return 'Anthropic';
+    if (normalized === 'openrouter') return 'OpenRouter';
+    if (normalized === 'deepseek') return 'DeepSeek';
+    if (normalized === 'groq') return 'Groq';
+    if (normalized === 'gemini') return 'Gemini';
+    if (normalized === 'zai') return 'ZAI';
+    if (normalized === 'perplexity') return 'Perplexity';
+    return normalized ? normalized.charAt(0).toUpperCase() + normalized.slice(1) : 'MLX-Pilot';
   }
 
   function providerPrefix(provider) {
@@ -126,6 +283,11 @@
     return resolveModelId(state.currentModel || state.agentConfig?.model_id || '', state.agentConfig?.provider);
   }
 
+  function activeAgentModelId() {
+    return resolveModelId(state.agentConfig?.model_id || state.currentModel || '', state.agentConfig?.provider)
+      || activeModelId();
+  }
+
   function currentPanelId() {
     return state.activePanel || document.querySelector('.tab.active')?.dataset.panel || 'chat';
   }
@@ -164,15 +326,389 @@
   function recommendedAgentModelId() {
     const preferred = state.models.find(model =>
       isToolReadyModel(model)
+      && isLocalProvider(model.provider || inferModelProvider(model.id, ''))
       && (model.agent_recommended || /qwen3\.5:9b/i.test(`${model.id || ''} ${model.name || ''}`))
     );
     if (preferred) return preferred.id;
-    return state.models.find(isToolReadyModel)?.id || '';
+    return state.models.find(model =>
+      isToolReadyModel(model) && isLocalProvider(model.provider || inferModelProvider(model.id, ''))
+    )?.id || '';
+  }
+
+  function configuredEnvironmentKeys() {
+    return new Set(
+      (state.environmentVars || [])
+        .filter(variable => variable && variable.present)
+        .map(variable => String(variable.key || '').trim().toUpperCase())
+        .filter(Boolean),
+    );
+  }
+
+  function profileHasConfiguredSecret(profile) {
+    if (!profile) return false;
+    if (isLocalProvider(profile.provider)) return true;
+    if (String(profile.api_key_ref || '').trim()) return true;
+    const secretKeys = CLOUD_PROVIDER_DEFAULTS[normalizeProviderId(profile.provider)]?.secretKeys || [];
+    const configuredKeys = configuredEnvironmentKeys();
+    return secretKeys.some((key) => configuredKeys.has(key));
+  }
+
+  function defaultCloudModelForProvider(provider) {
+    const normalized = normalizeProviderId(provider);
+    if (
+      state.agentConfig
+      && normalizeProviderId(state.agentConfig.provider) === normalized
+      && String(state.agentConfig.model_id || '').trim()
+    ) {
+      return state.agentConfig.model_id;
+    }
+    return CLOUD_PROVIDER_DEFAULTS[normalized]?.modelId || '';
+  }
+
+  function slugifyProfileId(value) {
+    return String(value || '')
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '');
+  }
+
+  function createProviderProfileDraft(seed = {}) {
+    const provider = normalizeProviderId(seed.provider || 'openai') || 'openai';
+    const fallbackId = `${provider}-${Date.now()}`;
+    return {
+      id: String(seed.id || slugifyProfileId(seed.description) || fallbackId),
+      description: String(seed.description || ''),
+      provider,
+      model_id: String(seed.model_id || defaultCloudModelForProvider(provider) || ''),
+      base_url: String(seed.base_url || ''),
+      api_key_ref: seed.api_key_ref != null ? String(seed.api_key_ref) : '',
+      runtime_variant: String(seed.runtime_variant || state.agentConfig?.runtime_variant || 'classic'),
+      custom_headers: seed.custom_headers || {},
+    };
+  }
+
+  function syncProviderProfileRow(row) {
+    if (!row) return;
+    const providerInput = row.querySelector('[data-field="provider"]');
+    const modelInput = row.querySelector('[data-field="model_id"]');
+    const baseUrlInput = row.querySelector('[data-field="base_url"]');
+    const secretInput = row.querySelector('[data-field="api_key_ref"]');
+    const statusNode = row.querySelector('.agent-provider-profile-status');
+    const useButton = row.querySelector('[data-action="use"]');
+    const provider = normalizeProviderId(providerInput?.value || 'openai') || 'openai';
+    const profile = {
+      provider,
+      api_key_ref: secretInput?.value || '',
+    };
+    const isLocal = isLocalProvider(provider);
+
+    if (modelInput && !String(modelInput.value || '').trim()) {
+      modelInput.value = defaultCloudModelForProvider(provider) || '';
+    }
+    if (baseUrlInput && !String(baseUrlInput.value || '').trim() && provider === 'ollama') {
+      baseUrlInput.placeholder = 'http://127.0.0.1:11434';
+    } else if (baseUrlInput) {
+      baseUrlInput.placeholder = provider === 'openai' ? 'https://api.openai.com/v1' : 'Opcional';
+    }
+
+    if (statusNode) {
+      if (isLocal) {
+        statusNode.textContent = 'Local';
+      } else if (profileHasConfiguredSecret(profile)) {
+        statusNode.textContent = 'Secret pronto';
+      } else {
+        statusNode.textContent = 'Secret pendente';
+      }
+    }
+    if (useButton) {
+      useButton.disabled = !isLocal && !profileHasConfiguredSecret(profile);
+    }
+  }
+
+  function renderAgentProviderProfiles() {
+    const list = document.getElementById('agent-provider-profile-list');
+    const note = document.getElementById('agent-provider-profiles-note');
+    if (!list) return;
+
+    const profiles = Array.isArray(state.agentConfig?.provider_profiles)
+      ? state.agentConfig.provider_profiles
+      : [];
+    const activeProfileId = String(state.agentConfig?.provider_profile_id || '').trim();
+
+    list.innerHTML = '';
+    if (profiles.length === 0) {
+      list.innerHTML = '<div class="agent-empty-copy">Nenhum profile salvo ainda</div>';
+    } else {
+      profiles.forEach((profile) => {
+        const draft = createProviderProfileDraft(profile);
+        const row = document.createElement('div');
+        row.className = 'plugin-item';
+        row.dataset.profileId = draft.id;
+        const providerOptions = AGENT_PROVIDER_PROFILE_TYPES
+          .map((option) => `<option value="${esc(option.value)}"${option.value === draft.provider ? ' selected' : ''}>${esc(option.label)}</option>`)
+          .join('');
+        const isActive = draft.id === activeProfileId;
+        row.innerHTML = `
+          <div class="plugin-info" style="width:100%">
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:10px">
+              <span class="plugin-name">${esc(draft.id)}</span>
+              <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+                <span class="agent-meta-pill">${isActive ? 'Ativo' : 'Salvo'}</span>
+                <span class="agent-meta-pill agent-provider-profile-status">${isLocalProvider(draft.provider) ? 'Local' : (profileHasConfiguredSecret(draft) ? 'Secret pronto' : 'Secret pendente')}</span>
+                <button class="action-btn" type="button" data-action="use"${!isLocalProvider(draft.provider) && !profileHasConfiguredSecret(draft) ? ' disabled' : ''}>Usar no Agent</button>
+                <button class="action-btn danger" type="button" data-action="remove">Remover</button>
+              </div>
+            </div>
+            <div class="config-fields">
+              <div class="config-field">
+                <label>Profile ID</label>
+                <input type="text" class="input" data-field="id" value="${esc(draft.id)}" placeholder="openai-prod" />
+              </div>
+              <div class="config-field">
+                <label>Provider</label>
+                <select class="input" data-field="provider">${providerOptions}</select>
+              </div>
+              <div class="config-field">
+                <label>Model ID</label>
+                <input type="text" class="input" data-field="model_id" value="${esc(draft.model_id)}" placeholder="gpt-4o-mini" />
+              </div>
+              <div class="config-field">
+                <label>Base URL</label>
+                <input type="text" class="input" data-field="base_url" value="${esc(draft.base_url)}" placeholder="Opcional" />
+              </div>
+              <div class="config-field">
+                <label>Secret Ref</label>
+                <input type="text" class="input" data-field="api_key_ref" value="${esc(draft.api_key_ref || '')}" placeholder="OPENAI_API_KEY" />
+              </div>
+              <div class="config-field">
+                <label>Runtime</label>
+                <select class="input" data-field="runtime_variant">
+                  <option value="classic"${draft.runtime_variant === 'classic' ? ' selected' : ''}>classic</option>
+                  <option value="hermes_inspired"${draft.runtime_variant === 'hermes_inspired' ? ' selected' : ''}>hermes_inspired</option>
+                </select>
+              </div>
+              <div class="config-field" style="grid-column:1 / -1">
+                <label>Description</label>
+                <input type="text" class="input" data-field="description" value="${esc(draft.description)}" placeholder="Production cloud profile" />
+              </div>
+            </div>
+          </div>`;
+        list.appendChild(row);
+        row.querySelectorAll('[data-field]').forEach((input) => {
+          input.addEventListener('input', () => syncProviderProfileRow(row));
+          input.addEventListener('change', () => syncProviderProfileRow(row));
+        });
+      });
+    }
+
+    list.querySelectorAll('[data-action="remove"]').forEach((button) => {
+      button.addEventListener('click', () => {
+        button.closest('[data-profile-id]')?.remove();
+        if (!list.children.length) {
+          list.innerHTML = '<div class="agent-empty-copy">Nenhum profile salvo ainda</div>';
+        }
+      });
+    });
+
+    list.querySelectorAll('[data-action="use"]').forEach((button) => {
+      button.addEventListener('click', async () => {
+        const profileId = button.closest('[data-profile-id]')?.dataset.profileId;
+        if (!profileId) return;
+        await activateAgentProviderProfile(profileId);
+      });
+    });
+
+    list.querySelectorAll('[data-profile-id]').forEach((row) => syncProviderProfileRow(row));
+
+    if (note) {
+      const active = profiles.find((profile) => profile.id === activeProfileId);
+      note.textContent = active
+        ? `Profile ativo: ${active.id} (${providerDisplayName(active.provider)}).`
+        : 'Edite provider, modelo, endpoint e referencia de secret. Use o profile desejado para tornar esse backend ativo no Agent.';
+    }
+  }
+
+  function readAgentProviderProfilesFromDom() {
+    const rows = Array.from(document.querySelectorAll('#agent-provider-profile-list [data-profile-id]'));
+    const existingProfiles = new Map(
+      (state.agentConfig?.provider_profiles || []).map((profile) => [String(profile.id || ''), profile]),
+    );
+    const profiles = [];
+    const seenIds = new Set();
+
+    rows.forEach((row, index) => {
+      const provider = normalizeProviderId(row.querySelector('[data-field="provider"]')?.value || 'openai') || 'openai';
+      const inputId = row.querySelector('[data-field="id"]')?.value || '';
+      const id = slugifyProfileId(inputId) || `${provider}-${index + 1}`;
+      if (seenIds.has(id)) {
+        throw new Error(`Profile ID duplicado: ${id}`);
+      }
+      seenIds.add(id);
+      const previous = existingProfiles.get(String(row.dataset.profileId || '')) || existingProfiles.get(id) || {};
+      profiles.push({
+        ...previous,
+        id,
+        description: String(row.querySelector('[data-field="description"]')?.value || '').trim(),
+        provider,
+        model_id: String(row.querySelector('[data-field="model_id"]')?.value || '').trim() || defaultCloudModelForProvider(provider),
+        base_url: String(row.querySelector('[data-field="base_url"]')?.value || '').trim(),
+        api_key_ref: String(row.querySelector('[data-field="api_key_ref"]')?.value || '').trim() || null,
+        runtime_variant: String(row.querySelector('[data-field="runtime_variant"]')?.value || 'classic').trim() || 'classic',
+        custom_headers: previous.custom_headers || {},
+      });
+    });
+
+    return profiles;
+  }
+
+  function buildAgentProviderOptions() {
+    const profiles = Array.isArray(state.agentConfig?.provider_profiles)
+      ? state.agentConfig.provider_profiles
+      : [];
+    const options = [];
+    const localProfiles = profiles.filter((profile) => isLocalProvider(profile.provider));
+    const preferredLocalProfile =
+      localProfiles.find((profile) => normalizeProviderId(profile.provider) === normalizeProviderId(state.agentConfig?.provider))
+      || localProfiles[0]
+      || null;
+    const localModelId = resolveModelId(
+      isLocalProvider(state.agentConfig?.provider)
+        ? state.agentConfig?.model_id
+        : (recommendedAgentModelId() || state.currentModel || preferredLocalProfile?.model_id || ''),
+      preferredLocalProfile?.provider || state.agentConfig?.provider || 'ollama',
+    );
+
+    options.push({
+      value: AGENT_LOCAL_PROVIDER_CHOICE,
+      label: 'MLX-Pilot',
+      provider: 'mlx-pilot',
+      kind: 'local',
+      profileId: preferredLocalProfile?.id || null,
+      modelId: localModelId,
+      description: 'Modelos locais agrupados no runtime MLX-Pilot.',
+    });
+
+    const selectedProfileId = String(state.agentConfig?.provider_profile_id || '').trim();
+    const groupedProfiles = new Map();
+    profiles
+      .filter((profile) => !isLocalProvider(profile.provider) && profileHasConfiguredSecret(profile))
+      .forEach((profile) => {
+        const providerId = normalizeProviderId(profile.provider);
+        const existing = groupedProfiles.get(providerId);
+        if (!existing || existing.id !== selectedProfileId) {
+          groupedProfiles.set(providerId, profile);
+        }
+        if (profile.id === selectedProfileId) {
+          groupedProfiles.set(providerId, profile);
+        }
+      });
+
+    groupedProfiles.forEach((profile, providerId) => {
+      options.push({
+        value: `cloud:${providerId}`,
+        label: providerDisplayName(providerId),
+        provider: providerId,
+        kind: 'cloud',
+        profileId: profile.id || null,
+        modelId: profile.model_id || defaultCloudModelForProvider(providerId),
+        description: profile.model_id || providerDisplayName(providerId),
+      });
+    });
+
+    Object.entries(CLOUD_PROVIDER_DEFAULTS).forEach(([providerId, descriptor]) => {
+      if (groupedProfiles.has(providerId)) return;
+      const configuredKeys = configuredEnvironmentKeys();
+      const hasSecret = descriptor.secretKeys.some((key) => configuredKeys.has(key));
+      const usingGlobalAgentSecret =
+        normalizeProviderId(state.agentConfig?.provider) === providerId
+        && Boolean(String(state.agentConfig?.api_key_ref || state.agentConfig?.api_key || '').trim());
+      if (!hasSecret && !usingGlobalAgentSecret) return;
+      options.push({
+        value: `cloud:${providerId}`,
+        label: descriptor.label,
+        provider: providerId,
+        kind: 'cloud',
+        profileId: null,
+        modelId: defaultCloudModelForProvider(providerId),
+        description: 'Secret configurado no ambiente local.',
+      });
+    });
+
+    state.agentProviderOptions = options;
+    return options;
+  }
+
+  function currentAgentProviderChoiceValue() {
+    const options = state.agentProviderOptions.length ? state.agentProviderOptions : buildAgentProviderOptions();
+    if (isLocalProvider(state.agentConfig?.provider)) {
+      return AGENT_LOCAL_PROVIDER_CHOICE;
+    }
+    const providerId = normalizeProviderId(state.agentConfig?.provider);
+    const selectedProfileId = String(state.agentConfig?.provider_profile_id || '').trim();
+    const matched =
+      options.find((option) => option.profileId && option.profileId === selectedProfileId)
+      || options.find((option) => option.provider === providerId);
+    return matched?.value || AGENT_LOCAL_PROVIDER_CHOICE;
+  }
+
+  function selectedAgentProviderOption() {
+    const select = document.getElementById('agent-provider-select');
+    const choiceValue = select?.value || currentAgentProviderChoiceValue();
+    const options = state.agentProviderOptions.length ? state.agentProviderOptions : buildAgentProviderOptions();
+    return options.find((option) => option.value === choiceValue) || options[0] || null;
+  }
+
+  function renderAgentProviderSelector() {
+    const select = document.getElementById('agent-provider-select');
+    const note = document.getElementById('agent-provider-note');
+    if (!select) return;
+
+    const options = buildAgentProviderOptions();
+    const currentValue = currentAgentProviderChoiceValue();
+
+    select.innerHTML = '';
+    options.forEach((option) => {
+      const node = document.createElement('option');
+      node.value = option.value;
+      node.textContent = option.kind === 'local'
+        ? `${option.label} (local)`
+        : `${option.label} (${String(option.modelId || 'modelo padrao')})`;
+      select.appendChild(node);
+    });
+
+    if (options.some((option) => option.value === currentValue)) {
+      select.value = currentValue;
+    } else if (options[0]) {
+      select.value = options[0].value;
+    }
+
+    const selected = selectedAgentProviderOption();
+    if (!note) return;
+    if (!selected) {
+      note.textContent = 'Selecione um provider para o Agent.';
+    } else if (selected.kind === 'local') {
+      note.textContent = 'Modelos locais aparecem como MLX-Pilot. O modelo do Agent continua vindo do seletor de modelos.';
+    } else {
+      note.textContent = `${selected.label} so aparece quando ja existe secret configurado. Modelo padrao: ${String(selected.modelId || '-')}.`;
+    }
   }
 
   function visibleModelsForCurrentPanel() {
     if (!isAgentPanelActive()) return state.models;
-    return state.models.filter(isToolReadyModel);
+    const providerOption = selectedAgentProviderOption();
+    if (providerOption?.kind === 'cloud') {
+      const cloudModelId = resolveModelId(
+        providerOption.modelId || state.agentConfig?.model_id || '',
+        providerOption.provider,
+      );
+      if (!cloudModelId) return [];
+      const current = state.models.find((model) => model.id === cloudModelId);
+      return current ? [current] : [];
+    }
+    return state.models.filter((model) =>
+      isLocalProvider(model.provider || inferModelProvider(model.id, '')) && isToolReadyModel(model)
+    );
   }
 
   function capabilityBadge(mode) {
@@ -219,13 +755,22 @@
       console.error('Agent model save failed:', error);
       return false;
     } finally {
+      renderAgentProviderSelector();
       hydrateModelShell();
       updateAgentWorkspaceSummary();
     }
   }
 
   async function ensureAgentCompatibleModel({ persist = false } = {}) {
-    const current = state.models.find(model => model.id === activeModelId());
+    const providerOption = selectedAgentProviderOption();
+    if (providerOption?.kind === 'cloud') {
+      if (providerOption.modelId) {
+        ensureVisibleModel(providerOption.modelId, providerOption.provider);
+      }
+      return true;
+    }
+
+    const current = state.models.find(model => model.id === activeAgentModelId());
     if (current && isToolReadyModel(current)) return true;
 
     const fallbackId = recommendedAgentModelId();
@@ -244,8 +789,6 @@
       || path.startsWith('/agent/run')
       || path.startsWith('/catalog/downloads')
         ? 120000
-        : path.startsWith('/openclaw')
-        ? API_SLOW_TIMEOUT_MS
         : API_DEFAULT_TIMEOUT_MS;
     const { timeoutMs = inferredTimeoutMs, headers: requestHeaders = {}, ...fetchOpts } = opts;
     const headers = { ...requestHeaders };
@@ -368,12 +911,15 @@
   }
 
   function hydrateModelShell() {
-    const configuredModel = resolveModelId(state.currentModel || state.agentConfig?.model_id, state.agentConfig?.provider);
+    const configuredModel = resolveModelId(state.agentConfig?.model_id || '', state.agentConfig?.provider);
     if (configuredModel) {
       ensureVisibleModel(configuredModel, state.agentConfig?.provider);
-      if (state.currentModel !== configuredModel) state.currentModel = configuredModel;
+    }
+    if (!state.currentModel && configuredModel && isLocalProvider(state.agentConfig?.provider)) {
+      state.currentModel = configuredModel;
     }
 
+    renderAgentProviderSelector();
     renderModelPicker();
     const currentModelId = activeModelId();
     if (currentModelId) {
@@ -383,20 +929,6 @@
     }
     renderInstalledModels();
     updateAgentWorkspaceSummary();
-  }
-
-  function setOpenClawAvailability(installed) {
-    state.openclawInstalled = !!installed;
-
-    const openClawTab = document.getElementById('tab-openclaw');
-    if (openClawTab) {
-      openClawTab.classList.toggle('hidden', !state.openclawInstalled);
-    }
-
-    if (!state.openclawInstalled) {
-      const activeOpenClawTab = document.querySelector('.tab.active[data-panel="openclaw"]');
-      if (activeOpenClawTab) switchTab('chat');
-    }
   }
 
   function waitForInjectedDaemonUrl(timeoutMs = 900) {
@@ -472,6 +1004,7 @@
       localStorage.setItem('mlxPilotDaemonUrl', candidate);
       updateSidebarDaemonUrl();
       updateStatusBadge(state.healthOk);
+      pushConsoleEntry('info', 'daemon', `Conectado em ${candidate}`);
       return health;
     }
 
@@ -480,6 +1013,7 @@
     state.provider = '';
     updateSidebarDaemonUrl(`Daemon ${state.daemonUrl.replace(/^https?:\/\//, '')} indisponivel`);
     updateStatusBadge(false);
+    pushConsoleEntry('warn', 'daemon', `Nenhum daemon respondeu. Tentativas: ${candidates.join(', ')}`);
     return null;
   }
 
@@ -494,7 +1028,6 @@
     ]);
 
     void Promise.allSettled([
-      loadOpenClawAvailability(),
       loadModels({ force: true }),
       loadPlugins(),
       loadSkills(),
@@ -502,6 +1035,7 @@
       loadChannels(),
       loadAudit(),
       loadEnvironment(),
+      loadConsoleSnapshot(),
     ]);
   }
 
@@ -548,8 +1082,18 @@
     return humanizeModelLabel(selectedId || state.currentModel || state.agentConfig?.model_id || '') || 'Nenhum modelo selecionado';
   }
 
+  function currentAgentModelLabel() {
+    const selectedId = activeAgentModelId();
+    const selected = state.models.find((model) => model.id === selectedId);
+    if (selected) return selected.name || selected.id;
+    return humanizeModelLabel(selectedId || state.agentConfig?.model_id || state.currentModel || '') || 'Nenhum modelo selecionado';
+  }
+
   function currentProviderLabel() {
-    return state.agentConfig?.provider || state.provider || 'auto';
+    const selected = selectedAgentProviderOption();
+    if (selected?.kind === 'local') return 'MLX-Pilot';
+    if (selected?.label) return selected.label;
+    return providerDisplayName(state.agentConfig?.provider || state.provider || 'auto');
   }
 
   function enabledSkillsCount() {
@@ -597,7 +1141,7 @@
     const currentSession = state.agentSessions.find(session => session.id === state.currentSessionId) || null;
     const execMode = state.agentConfig?.execution_mode || 'full';
     const approvalMode = state.agentConfig?.approval_mode || 'ask';
-    const modelLabel = currentModelLabel();
+    const modelLabel = currentAgentModelLabel();
     const providerLabel = currentProviderLabel();
 
     setText('agent-session-count', String(state.agentSessions.length));
@@ -630,18 +1174,8 @@
       const config = await api('/config');
       state.daemonConfig = config;
       populateSettings(config);
-      populateOpenClawConfig(config);
     } catch (e) {
       console.error('Config load failed:', e);
-    }
-  }
-
-  async function loadOpenClawAvailability() {
-    try {
-      const status = await api('/openclaw/status', { timeoutMs: 3000 });
-      setOpenClawAvailability(status?.available || status?.cli_exists);
-    } catch {
-      setOpenClawAvailability(false);
     }
   }
 
@@ -649,8 +1183,6 @@
     if (!c) return;
     const set = (id, val) => { const el = document.getElementById(id); if (el && val != null) el.value = val; };
     const setCheck = (id, val) => { const el = document.getElementById(id); if (el) el.checked = !!val; };
-    const fw = document.querySelector('input[name="settings-framework"][value="' + (c.active_agent_framework || 'openclaw') + '"]');
-    if (fw) { fw.checked = true; fw.dispatchEvent(new Event('change')); }
 
     set('set-mlx-cmd', c.mlx_command);
     set('set-mlx-prefix', c.mlx_prefix_args);
@@ -669,17 +1201,6 @@
     set('set-airllm-runner', c.mlx_airllm_runner);
   }
 
-  function populateOpenClawConfig(c) {
-    if (!c) return;
-    const set = (id, val) => { const el = document.getElementById(id); if (el && val != null) el.value = val; };
-    set('oc-models-dir', c.models_dir);
-    set('oc-cli-path', c.openclaw_cli_path);
-    set('oc-state-dir', c.openclaw_state_dir);
-
-    const fw = document.querySelector('#oc-framework-cards input[value="' + (c.active_agent_framework || 'openclaw') + '"]');
-    if (fw) { fw.checked = true; fw.dispatchEvent(new Event('change')); }
-  }
-
   async function saveDaemonConfig() {
     try {
       // Gather from settings inputs
@@ -688,8 +1209,6 @@
       const getNum = (id) => { const v = get(id); return v != null && v !== '' ? Number(v) : undefined; };
       const getCheck = (id) => { const el = document.getElementById(id); return el ? el.checked : undefined; };
       const fw = document.querySelector('input[name="settings-framework"]:checked');
-
-      if (fw) c.active_agent_framework = fw.value;
       if (get('set-mlx-cmd')) c.mlx_command = get('set-mlx-cmd');
       if (get('set-mlx-prefix')) c.mlx_prefix_args = get('set-mlx-prefix');
       if (getNum('set-mlx-timeout')) c.mlx_timeout_secs = getNum('set-mlx-timeout');
@@ -719,13 +1238,15 @@
       const configuredModel = resolveModelId(config?.model_id, config?.provider);
       if (configuredModel) {
         ensureVisibleModel(configuredModel, config.provider);
-        if (!state.currentModel) state.currentModel = configuredModel;
+        if (!state.currentModel && isLocalProvider(config?.provider)) state.currentModel = configuredModel;
       }
       populateAgentPolicy(config);
+      renderAgentProviderSelector();
+      renderAgentProviderProfiles();
       hydrateModelShell();
       if (configuredModel) {
         const configuredEntry = state.models.find(model => model.id === configuredModel);
-        if (configuredEntry && !isToolReadyModel(configuredEntry)) {
+        if (configuredEntry && isLocalProvider(config?.provider) && !isToolReadyModel(configuredEntry)) {
           void ensureAgentCompatibleModel({ persist: true });
         }
       }
@@ -759,6 +1280,8 @@
       };
       const res = await api('/agent/config', { method: 'POST', body: JSON.stringify(payload) });
       state.agentConfig = res || payload;
+      renderAgentProviderSelector();
+      renderAgentProviderProfiles();
       updateAgentWorkspaceSummary();
       return true;
     } catch (e) {
@@ -767,9 +1290,181 @@
     }
   }
 
+  async function saveAgentProviderSelection(choiceValue) {
+    const option = (state.agentProviderOptions || []).find((entry) => entry.value === choiceValue);
+    if (!option || !state.agentConfig) return false;
+
+    try {
+      const payload = { ...(state.agentConfig || {}) };
+      if (option.kind === 'local') {
+        let localModelId = resolveModelId(
+          state.currentModel || payload.model_id || option.modelId || recommendedAgentModelId(),
+          payload.provider,
+        );
+        let localModel = state.models.find((model) => model.id === localModelId);
+        if (
+          !localModel
+          || !isLocalProvider(localModel.provider || inferModelProvider(localModel.id, ''))
+          || !isToolReadyModel(localModel)
+        ) {
+          localModelId = recommendedAgentModelId()
+            || option.modelId
+            || state.models.find((model) =>
+              isLocalProvider(model.provider || inferModelProvider(model.id, ''))
+            )?.id
+            || '';
+          localModel = state.models.find((model) => model.id === localModelId);
+        }
+        if (!localModelId) return false;
+
+        const provider = inferModelProvider(
+          localModelId,
+          localModel?.provider || payload.provider || state.agentConfig?.provider || 'ollama',
+        );
+        payload.provider = provider;
+        payload.model_id = agentConfigModelId(localModelId, provider);
+        payload.provider_profile_id = option.profileId || '';
+        state.currentModel = localModelId;
+      } else {
+        payload.provider = option.provider;
+        payload.model_id = agentConfigModelId(
+          option.modelId || defaultCloudModelForProvider(option.provider),
+          option.provider,
+        );
+        payload.provider_profile_id = option.profileId || '';
+        ensureVisibleModel(payload.model_id, payload.provider);
+      }
+
+      const saved = await api('/agent/config', { method: 'POST', body: JSON.stringify(payload) });
+      state.agentConfig = saved || payload;
+      renderAgentProviderSelector();
+      renderAgentProviderProfiles();
+      hydrateModelShell();
+      updateAgentWorkspaceSummary();
+      return true;
+    } catch (error) {
+      console.error('Agent provider save failed:', error);
+      return false;
+    }
+  }
+
+  async function activateAgentProviderProfile(profileId) {
+    const profile = (state.agentConfig?.provider_profiles || []).find((entry) => String(entry.id || '') === String(profileId || ''));
+    if (!profile || !state.agentConfig) return false;
+    if (!isLocalProvider(profile.provider) && !profileHasConfiguredSecret(profile)) {
+      alert('Configure o secret desse provider antes de ativar o profile no Agent.');
+      return false;
+    }
+
+    try {
+      const payload = {
+        ...(state.agentConfig || {}),
+        provider: profile.provider,
+        provider_profile_id: profile.id,
+        model_id: agentConfigModelId(profile.model_id, profile.provider),
+      };
+      if (String(profile.base_url || '').trim()) payload.base_url = profile.base_url;
+      if (profile.api_key_ref) payload.api_key_ref = profile.api_key_ref;
+      if (profile.runtime_variant) payload.runtime_variant = profile.runtime_variant;
+
+      if (isLocalProvider(profile.provider)) {
+        const resolvedLocalModel = resolveModelId(profile.model_id, profile.provider);
+        if (resolvedLocalModel) {
+          state.currentModel = resolvedLocalModel;
+          ensureVisibleModel(resolvedLocalModel, profile.provider);
+        }
+      } else {
+        ensureVisibleModel(profile.model_id, profile.provider);
+      }
+
+      const saved = await api('/agent/config', { method: 'POST', body: JSON.stringify(payload) });
+      state.agentConfig = saved || payload;
+      renderAgentProviderSelector();
+      renderAgentProviderProfiles();
+      hydrateModelShell();
+      updateAgentWorkspaceSummary();
+      return true;
+    } catch (error) {
+      console.error('Provider profile activation failed:', error);
+      return false;
+    }
+  }
+
+  async function saveAgentProviderProfiles() {
+    if (!state.agentConfig) return false;
+
+    try {
+      const profiles = readAgentProviderProfilesFromDom();
+      const payload = {
+        ...(state.agentConfig || {}),
+        provider_profiles: profiles,
+      };
+      const activeProfileStillExists = profiles.some((profile) => profile.id === payload.provider_profile_id);
+      if (!activeProfileStillExists) {
+        payload.provider_profile_id = '';
+      }
+
+      const saved = await api('/agent/config', { method: 'POST', body: JSON.stringify(payload) });
+      state.agentConfig = saved || payload;
+      renderAgentProviderSelector();
+      renderAgentProviderProfiles();
+      hydrateModelShell();
+      updateAgentWorkspaceSummary();
+
+      const btn = document.getElementById('agent-save-provider-profiles');
+      if (btn) {
+        btn.textContent = 'Profiles salvos!';
+        setTimeout(() => {
+          btn.textContent = 'Salvar profiles';
+        }, 1800);
+      }
+      return true;
+    } catch (error) {
+      alert(error instanceof Error ? error.message : String(error));
+      return false;
+    }
+  }
+
   // Save agent policy when radio buttons change
   document.querySelectorAll('input[name="exec"], input[name="approval"]').forEach(r => {
     r.addEventListener('change', () => saveAgentPolicy());
+  });
+
+  document.getElementById('agent-provider-select')?.addEventListener('change', async (event) => {
+    const nextValue = event.target?.value;
+    if (!nextValue) return;
+    const ok = await saveAgentProviderSelection(nextValue);
+    if (!ok) {
+      renderAgentProviderSelector();
+    }
+  });
+
+  document.getElementById('agent-add-provider-profile')?.addEventListener('click', () => {
+    const list = document.getElementById('agent-provider-profile-list');
+    if (!list) return;
+    const isEmpty = list.querySelector('.agent-empty-copy');
+    if (isEmpty) list.innerHTML = '';
+
+    const profiles = Array.isArray(state.agentConfig?.provider_profiles)
+      ? state.agentConfig.provider_profiles
+      : [];
+    const draft = createProviderProfileDraft({
+      id: `openai-${profiles.length + 1}`,
+      provider: 'openai',
+      model_id: defaultCloudModelForProvider('openai'),
+      description: '',
+      api_key_ref: 'OPENAI_API_KEY',
+    });
+
+    state.agentConfig = {
+      ...(state.agentConfig || {}),
+      provider_profiles: [...profiles, draft],
+    };
+    renderAgentProviderProfiles();
+  });
+
+  document.getElementById('agent-save-provider-profiles')?.addEventListener('click', () => {
+    void saveAgentProviderProfiles();
   });
 
   // -- Models -------------------------------------------------
@@ -1372,99 +2067,6 @@
       }
     } catch (e) { console.error('New session failed:', e); }
   }
-
-  // -- OpenClaw Runtime ---------------------------------------
-  function agentEndpoint(path) {
-    const fw = state.openclawFramework;
-    return fw === 'nanobot' ? `/nanobot${path}` : `/openclaw${path}`;
-  }
-
-  function applyOpenClawFramework(value) {
-    state.openclawFramework = value === 'nanobot' ? 'nanobot' : 'openclaw';
-  }
-
-  async function loadRuntimeStatus() {
-    const card = document.getElementById('runtime-status-card');
-    try {
-      const runtime = await api(agentEndpoint('/runtime'));
-      if (!card || !runtime) return;
-      const isRunning = runtime.service_state === 'running' || runtime.running === true;
-      card.querySelector('.runtime-badge').className = `runtime-badge ${isRunning ? 'running' : ''}`;
-      card.querySelector('.runtime-badge').innerHTML = `<span class="badge-dot"></span> ${isRunning ? 'Executando' : 'Parado'}`;
-      const meta = card.querySelector('.runtime-meta');
-      if (meta) {
-        const parts = [];
-        if (runtime.pid) parts.push(`PID: ${runtime.pid}`);
-        if (runtime.uptime_seconds) parts.push(`Uptime: ${fmtDuration(runtime.uptime_seconds)}`);
-        meta.innerHTML = parts.map(p => `<span>${p}</span>`).join('');
-      }
-    } catch (e) {
-      if (card) {
-        const badge = card.querySelector('.runtime-badge');
-        if (badge) {
-          badge.className = 'runtime-badge';
-          badge.innerHTML = '<span class="badge-dot"></span> Indisponivel';
-        }
-        const meta = card.querySelector('.runtime-meta');
-        if (meta) meta.innerHTML = `<span>${esc(e.message)}</span>`;
-      }
-      console.error('Runtime load failed:', e);
-    }
-  }
-
-  async function loadOpenClawObservability() {
-    try {
-      const data = await api(agentEndpoint('/observability'));
-      if (!data) return;
-      const mv = document.querySelector('.obs-model-value');
-      if (mv) mv.textContent = data.model || '-';
-      const uv = document.querySelector('.obs-usage-value');
-      if (uv && data.usage) uv.textContent = fmtNum(data.usage.total || 0) + ' ';
-      const sl = document.querySelector('.obs-skills-list');
-      if (sl && data.skills?.length) sl.innerHTML = data.skills.map(s => `<span class="skill-chip active">${esc(s)}</span>`).join('');
-      else if (sl) sl.innerHTML = '<span style="color:var(--text-tertiary);font-size:12px">Nenhuma skill ativa</span>';
-      const tl = document.querySelector('.obs-tools-list');
-      if (tl && data.tools?.length) tl.innerHTML = data.tools.map(t => `<span class="tool-chip-sm">${esc(t)}</span>`).join('');
-      else if (tl) tl.innerHTML = '<span style="color:var(--text-tertiary);font-size:12px">Nenhum tool disponível</span>';
-    } catch (e) {
-      const mv = document.querySelector('.obs-model-value');
-      if (mv) mv.textContent = '-';
-      const uv = document.querySelector('.obs-usage-value');
-      if (uv) uv.textContent = 'Indisponivel';
-      const sl = document.querySelector('.obs-skills-list');
-      if (sl) sl.innerHTML = `<span style="color:var(--rose);font-size:12px">${esc(e.message)}</span>`;
-      const tl = document.querySelector('.obs-tools-list');
-      if (tl) tl.innerHTML = '<span style="color:var(--text-tertiary);font-size:12px">Nenhum tool disponivel</span>';
-    }
-  }
-
-  async function loadOpenClawLogs(stream) {
-    const body = document.getElementById('log-body');
-    if (!body) return;
-    body.innerHTML = '<div style="padding:20px;text-align:center;color:var(--text-tertiary)">Carregando...</div>';
-    try {
-      const data = await api(agentEndpoint(`/logs?stream=${stream || 'gateway'}&max_bytes=8000`));
-      const content = data?.content || '';
-      if (!content.trim()) {
-        body.innerHTML = '<div style="padding:20px;text-align:center;color:var(--text-tertiary)">Nenhum log disponível</div>';
-        return;
-      }
-      body.innerHTML = content.split('\n').filter(Boolean).map(line => {
-        const lvl = line.includes('ERROR') ? 'error' : line.includes('WARN') ? 'warn' : line.includes('DEBUG') ? 'debug' : 'info';
-        return `<div class="log-line"><span class="log-level ${lvl}">${lvl.toUpperCase().substring(0,4)}</span> ${esc(line)}</div>`;
-      }).join('');
-    } catch (e) {
-      body.innerHTML = `<div style="padding:20px;text-align:center;color:var(--rose)">Erro: ${esc(e.message)}</div>`;
-    }
-  }
-
-  async function openClawChat(message) {
-    try {
-      const res = await api(agentEndpoint('/chat'), { method: 'POST', body: JSON.stringify({ message }) });
-      return res?.reply || 'Sem resposta.';
-    } catch (e) { return `Erro: ${e.message}`; }
-  }
-
   // -- Plugins ------------------------------------------------
   async function loadPlugins() {
     try {
@@ -1684,13 +2286,116 @@
     updateAgentWorkspaceSummary();
   }
 
+  // -- Console ------------------------------------------------
+  function formatConsoleEntry(entry) {
+    const time = entry?.time
+      ? new Date(entry.time).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+      : '--:--:--';
+    return `${time} [${String(entry?.level || 'info').toUpperCase()}] ${entry?.source || 'ui'} - ${entry?.message || ''}`;
+  }
+
+  function normalizeNativeLogLine(line) {
+    const raw = String(line || '').trim();
+    const match = raw.match(/^(\d{10,})\s+(\[[^\]]+\])\s+(.*)$/);
+    if (!match) return raw;
+    const date = new Date(Number(match[1]));
+    const time = Number.isNaN(date.getTime())
+      ? match[1]
+      : date.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    return `${time} ${match[2]} native - ${match[3]}`;
+  }
+
+  function consoleText() {
+    const uiLines = state.consoleEntries.map(formatConsoleEntry);
+    const nativeLines = state.desktopLogEntries.map(normalizeNativeLogLine);
+    return [
+      '== UI ==',
+      ...(uiLines.length ? uiLines : ['Sem eventos de UI nesta sessao.']),
+      '',
+      '== Native ==',
+      ...(nativeLines.length ? nativeLines : ['Log nativo indisponivel ou vazio.']),
+    ].join('\n');
+  }
+
+  function renderConsole() {
+    const feed = document.getElementById('console-feed');
+    if (!feed) return;
+    const textValue = consoleText();
+    feed.textContent = textValue;
+    feed.scrollTop = feed.scrollHeight;
+
+    const count = document.getElementById('console-entry-count');
+    if (count) {
+      count.textContent = `${state.consoleEntries.length + state.desktopLogEntries.length} linhas`;
+    }
+  }
+
+  function renderConsoleStatus(health) {
+    const healthEl = document.getElementById('console-health');
+    const daemonUrlEl = document.getElementById('console-daemon-url');
+    const processEl = document.getElementById('console-process');
+    const runtimeEl = document.getElementById('console-runtime');
+    const logPathEl = document.getElementById('console-log-path');
+    const refreshedEl = document.getElementById('console-last-refresh');
+    const runtime = state.desktopRuntimeInfo || {};
+
+    if (healthEl) healthEl.textContent = health?.status === 'ok' ? 'Online' : 'Offline';
+    if (daemonUrlEl) daemonUrlEl.textContent = state.daemonUrl || runtime.daemon_url || '-';
+    if (processEl) processEl.textContent = runtime.pid ? `PID ${runtime.pid}` : 'Navegador';
+    if (runtimeEl) runtimeEl.textContent = runtime.embedded_daemon_enabled === false ? 'Daemon externo' : 'Daemon embutido';
+    if (logPathEl) logPathEl.textContent = runtime.log_path || 'Indisponivel no navegador';
+    if (refreshedEl) refreshedEl.textContent = `Atualizado ${new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`;
+  }
+
+  async function loadConsoleSnapshot() {
+    const health = await probeDaemon(state.daemonUrl, 900);
+    try {
+      state.desktopRuntimeInfo = await nativeInvoke('desktop_runtime_info');
+    } catch {
+      state.desktopRuntimeInfo = null;
+    }
+
+    try {
+      const snapshot = await nativeInvoke('desktop_log_snapshot', { limit: 220 });
+      state.desktopLogEntries = Array.isArray(snapshot?.entries) ? snapshot.entries : [];
+      if (snapshot?.path && !state.desktopRuntimeInfo) {
+        state.desktopRuntimeInfo = { log_path: snapshot.path };
+      }
+    } catch {
+      state.desktopLogEntries = [];
+    }
+
+    renderConsoleStatus(health);
+    renderConsole();
+  }
+
+  async function clearConsole() {
+    state.consoleEntries = [];
+    state.desktopLogEntries = [];
+    try {
+      await nativeInvoke('desktop_log_clear');
+    } catch {
+      /* Browser preview has no native log to clear. */
+    }
+    pushConsoleEntry('info', 'console', 'Console limpo');
+    renderConsole();
+  }
+
   // -- Environment --------------------------------------------
   async function loadEnvironment() {
     try {
       const data = await api('/environment?reveal=false');
       state.environmentVars = data?.variables || [];
       renderEnvironment();
-    } catch { state.environmentVars = []; renderEnvironment(); }
+      renderAgentProviderSelector();
+      renderAgentProviderProfiles();
+    } catch (e) {
+      console.error('Environment load failed:', e);
+      state.environmentVars = [];
+      renderEnvironment();
+      renderAgentProviderSelector();
+      renderAgentProviderProfiles();
+    }
   }
 
   function renderEnvironment() {
@@ -1704,24 +2409,107 @@
     state.environmentVars.forEach(v => {
       const row = document.createElement('div');
       row.className = 'env-row';
+      const displayValue = v.is_secret
+        ? (v.present ? (v.masked || '') : '')
+        : (v.value || '');
       row.innerHTML = `
         <span class="env-key">${esc(v.key)}</span>
-        <input type="${v.is_secret ? 'password' : 'text'}" class="input env-val" value="${esc(v.masked || v.value || '')}" data-key="${esc(v.key)}" ${v.is_secret ? 'data-secret="true"' : ''} />
-        ${v.is_secret ? '<button class="action-btn reveal-btn">Revelar</button>' : ''}`;
+        <input
+          type="${v.is_secret ? 'password' : 'text'}"
+          class="input env-val"
+          value="${esc(displayValue)}"
+          data-key="${esc(v.key)}"
+          data-secret="${v.is_secret ? 'true' : 'false'}"
+          data-present="${v.present ? 'true' : 'false'}"
+          data-initial-value="${esc(v.value || '')}"
+          data-masked-value="${esc(v.masked || '')}"
+          data-dirty="false"
+          data-revealed="false"
+        />
+        ${v.is_secret ? `<button class="action-btn reveal-btn"${v.present ? '' : ' disabled'}>${v.present ? 'Revelar' : 'Sem secret'}</button>` : ''}`;
       table.appendChild(row);
     });
+    const syncSecretButton = (input, btn) => {
+      if (!input || !btn) return;
+      const hasStoredSecret = input.dataset.present === 'true';
+      const revealed = input.dataset.revealed === 'true';
+      const hasDraft = String(input.value || '').trim() !== '' && input.dataset.dirty === 'true';
+      if (revealed) {
+        btn.disabled = false;
+        btn.textContent = 'Ocultar';
+        return;
+      }
+      if (hasStoredSecret) {
+        btn.disabled = false;
+        btn.textContent = 'Revelar';
+        return;
+      }
+      btn.disabled = !hasDraft;
+      btn.textContent = hasDraft ? 'Mostrar' : 'Sem secret';
+    };
+
+    table.querySelectorAll('.env-row').forEach((row) => {
+      const input = row.querySelector('.env-val');
+      const btn = row.querySelector('.reveal-btn');
+      if (!input) return;
+
+      const hiddenBaseline = () => (
+        input.dataset.secret === 'true'
+          ? (input.dataset.present === 'true' ? (input.dataset.maskedValue || '') : '')
+          : (input.dataset.initialValue || '')
+      );
+
+      input.addEventListener('input', () => {
+        const baseline = input.dataset.revealed === 'true'
+          ? (input.dataset.initialValue || '')
+          : hiddenBaseline();
+        input.dataset.dirty = input.value !== baseline ? 'true' : 'false';
+        syncSecretButton(input, btn);
+      });
+
+      syncSecretButton(input, btn);
+    });
+
     table.querySelectorAll('.reveal-btn').forEach(btn => {
       btn.addEventListener('click', async () => {
         const input = btn.previousElementSibling;
+        if (!input) return;
         if (input.dataset.revealed === 'true') {
-          input.type = 'password'; input.dataset.revealed = 'false'; btn.textContent = 'Revelar';
-        } else {
-          try {
-            const data = await api('/environment?reveal=true');
-            const found = (data?.variables || []).find(v => v.key === input.dataset.key);
-            if (found) { input.value = found.value; input.type = 'text'; input.dataset.revealed = 'true'; btn.textContent = 'Ocultar'; }
-          } catch { /* ok */ }
+          input.type = 'password';
+          input.dataset.revealed = 'false';
+          if (input.dataset.dirty !== 'true') {
+            input.value = input.dataset.present === 'true' ? (input.dataset.maskedValue || '') : '';
+          }
+          syncSecretButton(input, btn);
+          return;
         }
+
+        if (input.dataset.dirty === 'true') {
+          input.type = 'text';
+          input.dataset.revealed = 'true';
+          syncSecretButton(input, btn);
+          return;
+        }
+
+        if (input.dataset.present !== 'true') {
+          syncSecretButton(input, btn);
+          return;
+        }
+
+        try {
+          const data = await api('/environment?reveal=true');
+          const found = (data?.variables || []).find(v => v.key === input.dataset.key);
+          if (found?.present) {
+            input.value = found.value || '';
+            input.dataset.initialValue = found.value || '';
+            input.type = 'text';
+            input.dataset.revealed = 'true';
+            input.dataset.dirty = 'false';
+          }
+        } catch {
+          /* ok */
+        }
+        syncSecretButton(input, btn);
       });
     });
   }
@@ -1729,11 +2517,28 @@
   async function saveEnvironment() {
     const vals = {};
     document.querySelectorAll('#env-table .env-val').forEach(input => {
-      if (input.dataset.key && input.dataset.revealed === 'true') vals[input.dataset.key] = input.value;
+      if (!input.dataset.key) return;
+      const isSecret = input.dataset.secret === 'true';
+      const dirty = input.dataset.dirty === 'true';
+      const revealed = input.dataset.revealed === 'true';
+      const current = String(input.value || '');
+      const initial = String(input.dataset.initialValue || '');
+
+      if (isSecret) {
+        if (dirty || (revealed && current !== initial)) {
+          vals[input.dataset.key] = current;
+        }
+        return;
+      }
+
+      if (dirty || current !== initial) {
+        vals[input.dataset.key] = current;
+      }
     });
     if (Object.keys(vals).length === 0) { alert('Nenhuma variável foi revelada para edição.'); return; }
     try {
       await api('/environment', { method: 'POST', body: JSON.stringify({ values: vals }) });
+      await loadEnvironment();
       const btn = document.getElementById('save-env-btn');
       if (btn) { btn.textContent = 'Salvo!'; setTimeout(() => { btn.textContent = 'Salvar Variáveis'; }, 2000); }
     } catch (e) { alert('Erro: ' + e.message); }
@@ -1741,9 +2546,6 @@
 
   // -- Tab Navigation -----------------------------------------
   function switchTab(target) {
-    if (target === 'openclaw' && !state.openclawInstalled) {
-      target = 'chat';
-    }
 
     state.activePanel = target;
     document.querySelectorAll('.tab').forEach(t => { t.classList.remove('active'); t.setAttribute('aria-selected', 'false'); });
@@ -1759,12 +2561,12 @@
       searchCatalog('llama');
       if (state.activeDiscoverTab === 'installed') showInstalledModels();
     }
-    if (target === 'openclaw') { loadRuntimeStatus(); loadOpenClawObservability(); }
     if (target === 'agent') {
       void ensureAgentCompatibleModel({ persist: true });
       updateAgentWorkspaceSummary();
     }
     if (target === 'ai-interaction') initAICanvas();
+    if (target === 'console') void loadConsoleSnapshot();
   }
 
   document.querySelectorAll('.tab').forEach(tab => tab.addEventListener('click', () => switchTab(tab.dataset.panel)));
@@ -1823,69 +2625,6 @@
     clearTimeout(searchTimeout);
     searchTimeout = setTimeout(() => { if (e.target.value.trim().length >= 2) searchCatalog(e.target.value.trim()); }, 500);
   });
-
-  // -- OpenClaw Sub-tabs --------------------------------------
-  document.querySelectorAll('.oc-tab').forEach(tab => {
-    tab.addEventListener('click', async () => {
-      document.querySelectorAll('.oc-tab').forEach(t => t.classList.remove('active'));
-      tab.classList.add('active');
-      document.querySelectorAll('.oc-content').forEach(c => c.style.display = 'none');
-      document.getElementById(`oc-${tab.dataset.oc}`).style.display = 'block';
-      if (tab.dataset.oc === 'skills-tools') loadOpenClawObservability();
-      if (tab.dataset.oc === 'logs') loadOpenClawLogs('gateway');
-    });
-  });
-
-  document.querySelectorAll('input[name="settings-framework"], #oc-framework-cards input[name="framework"]').forEach(radio => {
-    radio.addEventListener('change', () => {
-      applyOpenClawFramework(radio.value);
-      if (document.getElementById('panel-openclaw')?.classList.contains('active')) {
-        loadRuntimeStatus();
-        loadOpenClawObservability();
-      }
-    });
-  });
-
-  // Log refresh + stream selector
-  document.getElementById('log-refresh-btn')?.addEventListener('click', () => {
-    const sel = document.getElementById('log-stream-select');
-    loadOpenClawLogs(sel?.value || 'gateway');
-  });
-  document.getElementById('log-stream-select')?.addEventListener('change', (e) => {
-    loadOpenClawLogs(e.target.value);
-  });
-
-  // -- OpenClaw Config Save -----------------------------------
-  document.getElementById('oc-save-config')?.addEventListener('click', async () => {
-    const c = state.daemonConfig || {};
-    const get = (id) => document.getElementById(id)?.value;
-    if (get('oc-models-dir')) c.models_dir = get('oc-models-dir');
-    if (get('oc-cli-path')) c.openclaw_cli_path = get('oc-cli-path');
-    if (get('oc-state-dir')) c.openclaw_state_dir = get('oc-state-dir');
-    const fw = document.querySelector('#oc-framework-cards input:checked');
-    if (fw) c.active_agent_framework = fw.value;
-    try {
-      await api('/config', { method: 'POST', body: JSON.stringify(c) });
-      state.daemonConfig = c;
-      const btn = document.getElementById('oc-save-config');
-      btn.textContent = 'Salvo!'; setTimeout(() => { btn.textContent = 'Aplicar Configurações'; }, 2000);
-    } catch (e) { alert('Erro: ' + e.message); }
-  });
-
-  // -- OpenClaw Chat ------------------------------------------
-  const ocInput = document.querySelector('#oc-chat .oc-input input');
-  const ocSendBtn = document.querySelector('#oc-chat .send-btn');
-  ocSendBtn?.addEventListener('click', async () => {
-    if (!ocInput?.value.trim()) return;
-    const msg = ocInput.value.trim(); ocInput.value = '';
-    const box = document.querySelector('#oc-chat .oc-messages');
-    box.innerHTML += `<div class="message user-message"><div class="msg-avatar">U</div><div class="msg-body"><div class="msg-content">${esc(msg)}</div></div></div>`;
-    const reply = await openClawChat(msg);
-    box.innerHTML += `<div class="message assistant-message"><div class="msg-avatar assistant">OC</div><div class="msg-body"><div class="msg-content markdown-body">${renderMarkdown(reply)}</div></div></div>`;
-    box.scrollTop = box.scrollHeight;
-  });
-  ocInput?.addEventListener('keydown', (e) => { if (e.key === 'Enter') ocSendBtn?.click(); });
-
   // -- Agent Chat ---------------------------------------------
   const agentInput = document.getElementById('agent-command-input');
   const agentSendBtn = document.getElementById('agent-send-btn');
@@ -1917,12 +2656,12 @@
     box.scrollTop = box.scrollHeight;
 
     try {
-      const modelId = activeModelId();
+      const modelId = activeAgentModelId();
       if (!modelId) throw new Error('Selecione um modelo valido antes de executar o agent.');
       const payload = {
         session_id: state.currentSessionId,
         message: msg,
-        provider: state.agentConfig?.provider || 'ollama',
+        provider: state.agentConfig?.provider || inferModelProvider(modelId, 'ollama') || 'ollama',
         model_id: modelId,
         execution_mode: state.agentConfig?.execution_mode || 'full',
         approval_mode: state.agentConfig?.approval_mode || 'ask',
@@ -1961,6 +2700,17 @@
 
   // -- Audit Refresh ------------------------------------------
   document.getElementById('refresh-audit')?.addEventListener('click', () => loadAudit());
+
+  document.getElementById('refresh-console')?.addEventListener('click', () => loadConsoleSnapshot());
+  document.getElementById('clear-console')?.addEventListener('click', () => clearConsole());
+  document.getElementById('copy-console')?.addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(consoleText());
+      pushConsoleEntry('info', 'console', 'Conteudo copiado para a area de transferencia');
+    } catch (error) {
+      pushConsoleEntry('error', 'console', `Falha ao copiar console: ${error.message}`);
+    }
+  });
 
   // -- Settings Save ------------------------------------------
   document.getElementById('save-settings-btn')?.addEventListener('click', async () => {
@@ -2079,26 +2829,6 @@
     resizeA(); mkA(); loopA();
     window.addEventListener('resize', () => { resizeA(); mkA(); });
   }
-
-  // -- OpenClaw Runtime Controls ------------------------------
-  async function runtimeAction(action) {
-    try {
-      const res = await api(agentEndpoint('/runtime'), { method: 'POST', body: JSON.stringify({ action }) });
-      if (res?.runtime) loadRuntimeStatus();
-    } catch (e) { alert('Erro: ' + e.message); }
-  }
-
-  document.getElementById('runtime-restart')?.addEventListener('click', () => runtimeAction('restart'));
-  document.getElementById('runtime-stop')?.addEventListener('click', () => runtimeAction('stop'));
-  document.getElementById('runtime-logs')?.addEventListener('click', () => {
-    // Switch to logs tab
-    document.querySelectorAll('.oc-tab').forEach(t => t.classList.remove('active'));
-    document.querySelector('.oc-tab[data-oc="logs"]')?.classList.add('active');
-    document.querySelectorAll('.oc-content').forEach(c => c.style.display = 'none');
-    document.getElementById('oc-logs').style.display = 'block';
-    loadOpenClawLogs('gateway');
-  });
-
   // -- Agent: New Session / Export -----------------------------
   document.getElementById('btn-new-session')?.addEventListener('click', async () => {
     try {
@@ -2208,7 +2938,7 @@
     if (e.key === 'Escape') document.getElementById('model-menu')?.classList.add('hidden');
     if (!e.ctrlKey && !e.metaKey && !e.altKey && !['INPUT', 'TEXTAREA'].includes(document.activeElement?.tagName)) {
       const n = parseInt(e.key);
-      if (n >= 1 && n <= 6) switchTab(['chat', 'discover', 'openclaw', 'agent', 'ai-interaction', 'settings'][n - 1]);
+      if (n >= 1 && n <= 6) switchTab(['chat', 'discover', 'agent', 'ai-interaction', 'console', 'settings'][n - 1]);
     }
     if ((e.ctrlKey || e.metaKey) && e.key === '.') state.streamController?.abort();
   });
@@ -2382,3 +3112,4 @@
   }
 
 })();
+

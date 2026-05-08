@@ -1310,152 +1310,6 @@ code { font-family: var(--font-mono); }
   background: var(--rose-soft);
 }
 
-/* --- OpenClaw Panel --- */
-.runtime-hero {
-  margin-bottom: 28px;
-}
-.runtime-status-card {
-  background: var(--bg-surface);
-  border: 1px solid var(--border);
-  border-radius: var(--r-lg);
-  padding: 24px;
-  position: relative;
-  overflow: hidden;
-}
-.runtime-status-card::before {
-  content: '';
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  height: 2px;
-  background: linear-gradient(90deg, var(--cyan), var(--violet));
-}
-.runtime-status-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 12px;
-}
-.runtime-framework {
-  font-family: var(--font-heading);
-  font-size: 20px;
-  font-weight: 600;
-}
-.runtime-badge {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 4px 14px;
-  border-radius: var(--r-full);
-  font-size: 12px;
-  font-weight: 500;
-}
-.runtime-badge.running {
-  background: var(--green-soft);
-  color: var(--green);
-}
-.runtime-badge .badge-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: currentColor;
-}
-.runtime-meta {
-  display: flex;
-  gap: 20px;
-  font-size: 13px;
-  color: var(--text-tertiary);
-  font-family: var(--font-mono);
-  margin-bottom: 16px;
-}
-.runtime-actions {
-  display: flex;
-  gap: 8px;
-}
-.runtime-btn {
-  padding: 8px 18px;
-  font-size: 12px;
-  font-weight: 600;
-  border-radius: var(--r-sm);
-  border: 1px solid var(--border);
-  color: var(--text-secondary);
-  transition: all 0.15s;
-}
-.runtime-btn:hover {
-  border-color: var(--border-hover);
-  color: var(--text-primary);
-  background: var(--bg-hover);
-}
-.runtime-btn.primary {
-  background: var(--cyan-soft);
-  border-color: var(--border-accent);
-  color: var(--cyan);
-}
-.runtime-btn.primary:hover {
-  background: rgba(0, 212, 255, 0.2);
-  box-shadow: var(--shadow-glow-cyan);
-}
-
-/* OpenClaw sub-tabs */
-.openclaw-subtabs {
-  display: flex;
-  gap: 4px;
-  margin-bottom: 20px;
-  border-bottom: 1px solid var(--border);
-  padding-bottom: 0;
-}
-.oc-tab {
-  padding: 10px 18px;
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--text-secondary);
-  border-bottom: 2px solid transparent;
-  margin-bottom: -1px;
-  transition: all 0.15s;
-}
-.oc-tab:hover { color: var(--text-primary); }
-.oc-tab.active {
-  color: var(--cyan);
-  border-bottom-color: var(--cyan);
-}
-
-/* OpenClaw Chat */
-.oc-chat-box {
-  background: var(--bg-surface);
-  border: 1px solid var(--border);
-  border-radius: var(--r-lg);
-  overflow: hidden;
-}
-.oc-messages {
-  padding: 20px;
-  max-height: 400px;
-  overflow-y: auto;
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-}
-.oc-input {
-  display: flex;
-  gap: 8px;
-  padding: 12px 16px;
-  border-top: 1px solid var(--border);
-  background: var(--bg-elevated);
-}
-.oc-input input {
-  flex: 1;
-  background: var(--bg-surface);
-  border: 1px solid var(--border);
-  border-radius: var(--r-sm);
-  padding: 8px 12px;
-  font-size: 13px;
-  color: var(--text-primary);
-  outline: none;
-}
-.oc-input input:focus {
-  border-color: var(--border-accent);
-}
-
 .tools-grid {
   display: flex;
   flex-wrap: wrap;
@@ -2681,6 +2535,102 @@ code { font-family: var(--font-mono); }
   color: var(--cyan);
 }
 
+/* --- Console Panel --- */
+.console-panel-scroll {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.console-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+  margin-bottom: 0;
+}
+
+.console-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.console-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 0.8fr) minmax(0, 0.8fr) minmax(0, 1.6fr);
+  gap: 14px;
+}
+
+.console-card {
+  min-width: 0;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.console-card-label,
+.console-card span:last-child {
+  display: block;
+  color: var(--text-tertiary);
+  font-size: 12px;
+}
+
+.console-card strong {
+  display: block;
+  margin: 5px 0;
+  color: var(--text-primary);
+  font-family: var(--font-heading);
+  font-size: 17px;
+  font-weight: 700;
+}
+
+.console-card span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+}
+
+.console-feed-shell {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: rgba(3, 6, 10, 0.78);
+}
+
+.console-feed-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-family: var(--font-mono);
+}
+
+.console-feed {
+  flex: 1;
+  min-height: 360px;
+  margin: 0;
+  padding: 14px;
+  overflow: auto;
+  color: #cfe7ff;
+  font-size: 12px;
+  line-height: 1.65;
+  font-family: var(--font-mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 /* --- Settings Panel --- */
 .settings-grid {
   display: grid;
@@ -2885,6 +2835,15 @@ code { font-family: var(--font-mono); }
     grid-template-columns: 1fr;
   }
   .settings-grid {
+    grid-template-columns: 1fr;
+  }
+  .console-header {
+    flex-direction: column;
+  }
+  .console-actions {
+    justify-content: flex-start;
+  }
+  .console-grid {
     grid-template-columns: 1fr;
   }
   .model-card-header {
